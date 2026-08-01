@@ -1,0 +1,38 @@
+[build-system]
+# scikit-build-core drives CMake; nanobind ships the CMake helpers we call below.
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0", "numpy>=1.22"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "takumi"
+version = "0.1.0"
+description = "Sequence-packing and masking utilities with C++/nanobind hot paths."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Hazem Essam" }]
+dependencies = [
+    "numpy>=1.22",
+]
+
+[project.optional-dependencies]
+# torch is only needed for the masking helpers, not for packing.
+torch = ["torch>=1.13"]
+dev = ["pytest>=7.0"]
+
+[tool.scikit-build]
+# Keep compiled objects in a stable dir so rebuilds are incremental, not from scratch.
+build-dir = "build/{wheel_tag}"
+# NOTE: auto-rebuild-on-import (editable.rebuild = true) was tried and reverted:
+# its import hook calls bare `cmake`, which isn't on PATH when running
+# `.venv/bin/python` directly (cmake lives in .venv as a pip package). After a
+# C++ change, re-run the build command explicitly — see README "dev loop".
+# Only ship the Python package; `src/` holds C++ sources that CMake compiles.
+wheel.packages = ["takumi"]
+# Fail loudly if a compiled module is missing rather than shipping a broken wheel.
+minimum-version = "build-system.requires"
+
+[tool.scikit-build.cmake]
+version = ">=3.26"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

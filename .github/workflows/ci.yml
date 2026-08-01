@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # Broad sweep with no tensor framework installed. This is the compatibility
+  # matrix: it proves the C++ extension compiles on every platform (notably
+  # x86-64 Linux, where integer-division and alignment bugs behave differently
+  # than on arm64 macOS), that the declared requires-python floor is real, and
+  # that takumi.packing genuinely works without torch or JAX.
+  packing:
+    name: packing · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # src/packing/packing.cpp uses std::ranges::to (C++23, P1206R7), which
+      # landed in libstdc++ 14 — and ubuntu-latest still defaults to g++-13.
+      # If you ever drop those two calls for a plain loop, the project falls
+      # back to C++20 and this step can go away.
+      - name: Select GCC 14
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: Install build tooling
+        run: python -m pip install nanobind scikit-build-core cmake ninja numpy pytest
+
+      - name: Build extension (editable, as the README documents)
+        run: python -m pip install --no-build-isolation -e .
+
+      - name: takumi.packing must import with no tensor framework present
+        run: python -c "from takumi.packing import pack; print(pack([7, 6, 5, 4, 3, 2], 10))"
+
+      - name: Run packing tests
+        run: >
+          python -m pytest -q
+          --ignore=tests/test_masking.py
+          --ignore=tests/test_scheduler_multiprocessing.py
+
+  # Narrower matrix that installs torch and runs everything, including the
+  # multiprocessing scheduler tests. Those parametrize over each start method
+  # the platform offers, so Linux covers fork/spawn/forkserver and Windows
+  # covers spawn-only — the split that makes shared-state bugs platform
+  # specific in the first place.
+  full:
+    name: full · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: macos-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Select GCC 14
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: Install build tooling
+        run: python -m pip install nanobind scikit-build-core cmake ninja numpy pytest
+
+      # The CPU index keeps Linux from pulling the multi-GB CUDA build; macOS
+      # and Windows wheels on PyPI are already CPU-only.
+      - name: Install torch (CPU)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          else
+            python -m pip install torch
+          fi
+
+      - name: Build extension
+        run: python -m pip install --no-build-isolation -e .
+
+      - name: Run full suite (torch backend)
+        run: python -m pytest -q
+
+      # Second backend, one platform. The corruptors are backend-agnostic, so
+      # this mostly guards the import-time backend switch and the numpy<->jax
+      # conversions in takumi/masking/backend/.
+      - name: Run full suite (JAX backend)
+        if: runner.os == 'Linux'
+        run: python -m pip install jax && TAKUMI_MASKING_BACKEND=jax python -m pytest -q
+
+  # Proves the package builds from a clean environment — i.e. that
+  # build-system.requires is actually complete. Deliberately does NOT pass
+  # --no-build-isolation, which is what makes this different from the jobs
+  # above, and installs the resulting wheel outside the source tree so the
+  # checkout cannot shadow it.
+  dist:
+    name: sdist + wheel (isolated build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Select GCC 14
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Install the wheel and smoke-test it away from the source tree
+        run: |
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          python -c "from takumi.packing import pack; print(pack([7, 6, 5, 4, 3, 2], 10))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*

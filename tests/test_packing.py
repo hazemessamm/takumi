@@ -1,0 +1,94 @@
+"""Tests for the C++/nanobind greedy packer.
+
+These mirror the original seqpack test suite and add a differential test against
+a small pure-Python reference so we know the port is faithful, not just plausible.
+"""
+
+import random
+
+import pytest
+
+from takumi.packing import pack_first_fit
+
+
+def reference_greedy(lengths, max_seq_len, tolerance=1):
+    """Pure-Python First-Fit-Decreasing with a *stable* tie sort.
+
+    The C++ core uses std::stable_sort, so this reference breaks length-ties the
+    same way (by original index). NOTE: the original numpy seqpack uses an
+    unstable np.argsort, so it can disagree on tie order — but only on *which*
+    equal-length item lands in which bin; bin count and per-bin sums match.
+    """
+    order = sorted(range(len(lengths)), key=lambda i: -(lengths[i] // tolerance))
+    bins, remaining = [], []
+    for idx in order:
+        seq_len = lengths[idx]
+        for b in range(len(bins)):
+            if remaining[b] >= seq_len:
+                bins[b].append(idx)
+                remaining[b] -= seq_len
+                break
+        else:
+            bins.append([idx])
+            remaining.append(max_seq_len - seq_len)
+    return bins
+
+
+def test_no_bin_exceeds_capacity():
+    lengths = [7, 6, 5, 4, 3, 2]
+    for bin_ in pack_first_fit(lengths, max_length=10):
+        assert sum(lengths[i] for i in bin_) <= 10
+
+
+def test_all_indices_packed_exactly_once():
+    lengths = [7, 6, 5, 4, 3, 2]
+    bins = pack_first_fit(lengths, max_length=10)
+    flat = [i for bin_ in bins for i in bin_]
+    assert sorted(flat) == list(range(len(lengths)))
+
+
+def test_worked_example_from_docs():
+    # PACKING.md: lengths [7,6,5,4,3,2], cap 10 -> [[7,3],[6,4],[5,2]]
+    bins = pack_first_fit([7, 6, 5, 4, 3, 2], max_length=10)
+    assert bins == [[0, 4], [1, 3], [2, 5]]
+
+
+def test_matches_python_reference_randomized():
+    rng = random.Random(0)
+    for _ in range(200):
+        n = rng.randint(0, 50)
+        cap = rng.randint(4, 32)
+        lengths = [rng.randint(1, cap) for _ in range(n)]
+        assert pack_first_fit(lengths, cap) == reference_greedy(lengths, cap)
+
+
+def test_empty_input():
+    assert pack_first_fit([], max_length=10) == []
+
+
+def test_seed_is_reproducible():
+    # The defining property of a seed: same seed -> identical output, every time.
+    lengths = [5, 5, 5, 4, 4, 3, 2, 2, 1]
+    a = pack_first_fit(lengths, 10, seed=42)
+    b = pack_first_fit(lengths, 10, seed=42)
+    assert a == b
+
+
+def test_seed_produces_valid_packing():
+    lengths = [5, 5, 5, 4, 4, 3, 2, 2, 1]
+    bins = pack_first_fit(lengths, 10, seed=7)
+    flat = sorted(i for bin_ in bins for i in bin_)
+    assert flat == list(range(len(lengths)))                     # every index once
+    assert all(sum(lengths[i] for i in b) <= 10 for b in bins)   # no bin over cap
+
+
+def test_seed_affects_ordering_across_many_seeds():
+    # Robust "seed has an effect": over many seeds we must see >1 ordering.
+    # Not a coin flip -- with fully-tied items, all-identical is astronomically
+    # unlikely, so this won't flake the way a single seed-pair comparison would.
+    lengths = [5] * 12  # all tied -> maximal shuffle freedom
+    orderings = {
+        tuple(pack_first_fit(lengths, 10, seed=s)[0]) for s in range(20)
+    }
+    assert len(orderings) > 1
+
