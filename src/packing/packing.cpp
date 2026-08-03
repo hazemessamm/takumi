@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
+#include <string>   // std::to_string — pulled in transitively by libstdc++/libc++, but not by MSVC
 #include <vector>
 #include <random>
 #include <numeric>
