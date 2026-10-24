@@ -124,15 +124,70 @@ from takumi.masking import (
     CategoricalMasker, # per-call rate from an external sampler
     DiffusionMasker,   # mask-only, rate driven by a timestep schedule
     HybridSpanMasker,  # 80/10/10 over contiguous spans plus scatter
+    MaskGITMasker,     # MaskGIT training: per-row timestep, exact count
 )
 
 diffusion = DiffusionMasker(
     total_timesteps=1000,
     mask_token_id=3,
     special_token_ids=[0, 1, 2, 3],
-    schedule="cosine",  # or "linear", "sqrt", or a callable
+    schedule="cosine",  # MaskGIT's; or "linear", "sqrt", or a callable
 )
 result = diffusion(x, seed=10, timestep=500)
+result = diffusion(x, seed=10, timestep=torch.randint(0, 1001, (8,)))  # per row
+
+maskgit = MaskGITMasker(mask_token_id=3, special_token_ids=[0, 1, 2, 3])
+result = maskgit(x, seed=10)  # each row draws its own timestep
+```
+
+### MaskGIT decoding
+
+`MaskGITDecoder` runs one step of MaskGIT's iterative decoding: it commits the
+model's samples, then re-masks the least confident ones so the masked fraction
+follows the schedule. `backend.sample` draws one token per position from the
+`(B, L, V)` logits on the model's device, so only the `(B, L)` tokens and their
+probabilities reach the decoder.
+
+```python
+from takumi.masking import MaskGITDecoder, backend
+
+decoder = MaskGITDecoder(mask_token_id=3, total_steps=12)
+
+tokens = torch.full((8, 200), 3)  # start fully masked
+for step in range(12):
+    sampled, probs = backend.sample(model(tokens), mask_token_id=3)
+    tokens = decoder(tokens, sampled, probs, step, num_unknown=200)
+```
+
+`backend.sample` never draws `mask_token_id`, takes `temperature=0.0` for
+greedy decoding, and accepts `seed=` for a reproducible draw.
+
+#### Remasking committed tokens
+
+Plain MaskGIT never revisits a token once it is committed, so early mistakes
+stay. With `remask_prob > 0` (off by default), each token committed on an
+earlier step goes back to the mask with that probability on every step whose
+progress falls inside `remask_window`, and gets re-predicted later
+([ReMDM](https://arxiv.org/abs/2503.00307)). Pass `current_probs` to re-mask
+the tokens the model now trusts least instead of random ones. Re-predicting
+costs steps, so raise `total_steps` when you turn it on.
+
+```python
+decoder = MaskGITDecoder(
+    mask_token_id=3,
+    total_steps=24,
+    remask_prob=0.1,
+    remask_window=(0.25, 0.75),  # progress range where remasking applies
+)
+
+tokens = torch.full((8, 200), 3)
+generated = tokens == 3  # what may be re-masked; prompt tokens are left alone
+for step in range(24):
+    logits = model(tokens)
+    sampled, probs = backend.sample(logits, mask_token_id=3)
+    current = backend.token_probs(logits, tokens)
+    tokens = decoder(tokens, sampled, probs, step, num_unknown=200,
+                     generated=generated, current_probs=current)
 ```
 
 ### Composing a corruptor directly
@@ -162,8 +217,10 @@ result = corruptor(x, seed=10)
 Available pieces:
 
 - rates — `FixedRate(rate)`, `BetaRate(mean, concentration)`,
-  `SampledRate(sampler)`, `ScheduleRate(total_timesteps, schedule)`
-- selectors — `Bernoulli()`, `FocusBiased(strategy, strength)`, `Spans(...)`
+  `SampledRate(sampler)`, `ScheduleRate(total_timesteps, schedule)`,
+  `UniformTimestepRate(schedule)` (one rate per row)
+- selectors — `Bernoulli()`, `FocusBiased(strategy, strength)`, `Spans(...)`,
+  `ExactCount()`
 - schemes — `Mixed(mask_prob, mutate_prob, mask_token_id, valid_token_ids)`,
   `MaskOnly(mask_token_id)`
 
@@ -175,7 +232,7 @@ result = corruptor(
     seed=10,                  # bit-exact reproducible call
     excluded_ids=[0, 1],      # overrides special_token_ids for this call
     focus=focus_mask,         # (B, L) bool mask to bias selection toward
-    timestep=500,             # required by ScheduleRate, ignored otherwise
+    timestep=500,             # required by ScheduleRate (scalar or (B,)), ignored otherwise
 )
 ```
 

@@ -35,23 +35,35 @@ def stream_packed_bins(
     """Yield one concrete bin at a time for a single epoch of a blueprint.
 
     Args:
-        templates: Bin layouts to emit, mapped to how many bins use each; a
-            layout is a tuple of the sequence lengths sharing a bin.
-        index_pools: For each length, the dataset indices that have it.
-        seed: Seed for both the per-length draw order and the layout emission
-            order. The same seed reproduces the same epoch exactly.
-        interleave: When ``False`` (default) every bin of one layout is emitted
+        templates (Mapping[tuple[int, ...], int]): Bin layouts to emit,
+            mapped to how many bins use each; a layout is a tuple of the
+            sequence lengths sharing a bin.
+        index_pools (Mapping[int, Sequence[int]]): For each length, the
+            dataset indices that have it.
+        seed (int | None): Seed for both the per-length draw order and the
+            layout emission order. The same seed reproduces the same epoch
+            exactly.
+        interleave (bool): When ``False`` (default) every bin of one layout is emitted
             back-to-back in a seed-shuffled layout order — cheap, only
             ``O(distinct layouts)`` of state. When ``True`` the individual bins
             are shuffled together so consecutive bins tend to differ in shape,
             at the cost of ``O(total bins)`` of state.
 
     Yields:
-        Each bin as a ``list[int]`` of dataset indices.
+        list[int]: Each bin as a list of dataset indices.
 
     Raises:
         ValueError: if a layout asks for more indices of some length than the
             matching pool holds (inconsistent templates / index pools).
+
+    Example:
+        >>> bins = stream_packed_bins(
+        ...     templates={(6, 4): 1, (5, 5): 1},
+        ...     index_pools={6: [0], 4: [1], 5: [2, 3]},
+        ...     seed=0,
+        ... )
+        >>> list(bins)
+        [[0, 1], [2, 3]]
     """
     rng = np.random.default_rng(seed)
 
@@ -88,6 +100,23 @@ def _emission_order(
     each ``count`` times. Interleaved: expand to one entry per bin and shuffle
     the whole run. Both orderings are produced by ``rng.permutation`` over an
     index range, so the sequence is a pure function of the seed.
+
+    Args:
+        layouts (Mapping[tuple[int, ...], int]): Bin layout to bin count.
+        rng (np.random.Generator): Source of the shuffle.
+        interleave (bool): Shuffle individual bins instead of layouts.
+
+    Yields:
+        tuple[int, ...]: The layout of each bin, ``sum(layouts.values())``
+        in total.
+
+    Example:
+        >>> import numpy as np
+        >>> layouts = {(6, 4): 2, (5, 5): 1}
+        >>> list(_emission_order(layouts, np.random.default_rng(0), interleave=False))
+        [(6, 4), (6, 4), (5, 5)]
+        >>> list(_emission_order(layouts, np.random.default_rng(0), interleave=True))
+        [(5, 5), (6, 4), (6, 4)]
     """
     distinct = list(layouts.keys())
 

@@ -14,6 +14,22 @@ class LinearScheduler(Scheduler):
 
     This allows for a curriculum learning approach where the distribution of
     masking probabilities can change during training.
+
+    Args:
+        initial_weights (list[float], length N): Weights at step 0, ``>= 0``.
+        final_weights (list[float], length N): Weights from ``total_steps``
+            on, ``>= 0``.
+        total_steps (int): Steps to go from one to the other, ``> 0``.
+
+    Raises:
+        ValueError: If the lists differ in length or hold negative values,
+            or ``total_steps`` is not positive.
+
+    Example:
+        >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=4)
+        >>> scheduler.step()
+        >>> scheduler.sample()
+        [0.75, 0.25]
     """
 
     def __init__(
@@ -33,7 +49,19 @@ class LinearScheduler(Scheduler):
         self.total_steps = total_steps
 
     def sample(self) -> List[float]:
-        """Get the interpolated weights for the current step."""
+        """Get the interpolated weights for the current step.
+
+        Returns:
+            list[float], length N: ``initial + progress * (final -
+            initial)``, with ``progress = min(step / total_steps, 1)``.
+
+        Example:
+            >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=2)
+            >>> for _ in range(5):
+            ...     scheduler.step()
+            >>> scheduler.sample()  # holds at the final weights
+            [0.0, 1.0]
+        """
         progress = self.current_step.get() / self.total_steps
         progress = min(progress, 1.0)
 

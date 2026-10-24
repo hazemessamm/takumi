@@ -60,6 +60,7 @@ jobs:
         run: >
           python -m pytest -q
           --ignore=tests/test_masking.py
+          --ignore=tests/test_masking_stats.py
           --ignore=tests/test_scheduler_multiprocessing.py
 
   # Narrower matrix that installs torch and runs everything, including the

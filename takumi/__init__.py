@@ -21,6 +21,20 @@ def __getattr__(name: str):
     machinery, and ``takumi.masking`` after a bare ``import takumi`` lands
     here. Python caches the submodule on the package after the first
     import, so this runs at most once.
+
+    Args:
+        name (str): The attribute being looked up.
+
+    Returns:
+        module: ``takumi.masking`` when ``name == "masking"``.
+
+    Raises:
+        AttributeError: For any other name.
+
+    Example:
+        >>> import takumi
+        >>> takumi.masking.__name__
+        'takumi.masking'
     """
     if name == "masking":
         import importlib
@@ -30,4 +44,14 @@ def __getattr__(name: str):
 
 
 def __dir__():
+    """List the public names, including the lazily imported ``masking``.
+
+    Returns:
+        list[str]: Sorted ``__all__``.
+
+    Example:
+        >>> import takumi
+        >>> dir(takumi)
+        ['masking', 'packing']
+    """
     return sorted(__all__)

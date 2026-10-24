@@ -1,3 +1,23 @@
+"""Tensor-framework backend for ``takumi.masking``, chosen once at import.
+
+``TAKUMI_MASKING_BACKEND`` (``"torch"``, the default, or ``"jax"``) picks the
+module bound to ``backend``. Both modules expose the same interface:
+
+- ``to_tensor(x)`` / ``to_numpy(x)`` — convert between NumPy and the
+  framework's array type.
+- ``framework(x)`` — the backend's name, ``"torch"`` or ``"jax"``.
+- ``sample(logits, mask_token_id, temperature, seed)`` — on-device sampling
+  of one token per position, for `MaskGITDecoder`.
+- ``token_probs(logits, tokens)`` — on-device probability of the tokens
+  already in a sequence, for `MaskGITDecoder`'s confidence remasking.
+- ``ArrayLike`` — the union of NumPy arrays and the framework's arrays.
+
+Example:
+    >>> from takumi.masking import backend
+    >>> backend.framework(None) in ("torch", "jax")
+    True
+"""
+
 import logging
 import os
 

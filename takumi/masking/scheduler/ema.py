@@ -14,6 +14,27 @@ class EMAScheduler(Scheduler):
     weights. The update rule is equivalent to an exponential interpolation:
     w_t = beta^t * w_0 + (1 - beta^t) * w_final
     Where t is the effective step count.
+
+    Args:
+        initial_weights (list[float], length N): Weights at step 0, ``>= 0``.
+        final_weights (list[float], length N): Weights approached as steps
+            grow, ``>= 0``.
+        beta (float): Decay per effective step, in ``(0, 1)``; closer to 1
+            moves more slowly.
+        multiplier (float): Effective steps per counter step, ``> 0``.
+
+    Raises:
+        ValueError: If the lists differ in length or hold negative values,
+            ``beta`` is outside ``(0, 1)``, or ``multiplier`` is not
+            positive.
+
+    Example:
+        >>> scheduler = EMAScheduler([1.0, 0.0], [0.0, 1.0], beta=0.5)
+        >>> scheduler.sample()
+        [1.0, 0.0]
+        >>> scheduler.step()
+        >>> scheduler.sample()
+        [0.5, 0.5]
     """
 
     def __init__(
@@ -39,7 +60,18 @@ class EMAScheduler(Scheduler):
         self.multiplier = multiplier
 
     def sample(self) -> List[float]:
-        """Get the interpolated weights for the current step."""
+        """Get the interpolated weights for the current step.
+
+        Returns:
+            list[float], length N: ``beta**t * initial + (1 - beta**t) *
+            final``, with ``t = step * multiplier``.
+
+        Example:
+            >>> scheduler = EMAScheduler([1.0, 0.0], [0.0, 1.0], beta=0.5, multiplier=2.0)
+            >>> scheduler.step()
+            >>> scheduler.sample()  # t = 2, so beta**t = 0.25
+            [0.25, 0.75]
+        """
         effective_step = self.current_step.get() * self.multiplier
         decay_factor = self.beta**effective_step
         return [

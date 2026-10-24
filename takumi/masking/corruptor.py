@@ -21,6 +21,25 @@ class MaskingResult(typing.NamedTuple):
     the selected positions (mutually exclusive; their union is the full set
     of positions where ``labels != -100``). All five fields share the input's
     shape and type.
+
+    Attributes:
+        sequences (ArrayLike of int, shape (B, L)): The corrupted tokens.
+        labels (ArrayLike of int, shape (B, L)): The original token at every
+            selected position, ``-100`` elsewhere. Unsigned inputs come back
+            as int64 so ``-100`` fits.
+        masked (ArrayLike of bool, shape (B, L)): Replaced with the mask
+            token.
+        mutated (ArrayLike of bool, shape (B, L)): Replaced with a random
+            valid token.
+        kept (ArrayLike of bool, shape (B, L)): Selected but unchanged.
+
+    Example:
+        >>> import numpy as np
+        >>> from takumi.masking import Bernoulli, FixedRate, MaskOnly
+        >>> corruptor = Corruptor(FixedRate(0.5), Bernoulli(), MaskOnly(3), [0])
+        >>> sequences, labels, masked, mutated, kept = corruptor(np.full((2, 4), 7), seed=0)
+        >>> bool(((labels != -100) == (masked | mutated | kept)).all())
+        True
     """
 
     sequences: backend.ArrayLike
@@ -35,10 +54,12 @@ class Corruptor:
 
     A corruption call is always the same pipeline, with each stage swappable:
 
-    1. **rate** (`RatePolicy`) — the per-call fraction of eligible positions
-       to select (fixed / Beta / sampler / diffusion schedule).
+    1. **rate** (`RatePolicy`) — the fraction of eligible positions to
+       select, per call or per row (fixed / Beta / sampler / diffusion
+       schedule).
     2. **select** (`Selector`) — which eligible positions to take given the
-       rate (independent Bernoulli / focus-biased / contiguous spans).
+       rate (independent Bernoulli / focus-biased / contiguous spans /
+       exact count).
     3. **corrupt** (`CorruptionScheme`) — what to do with them (80/10/10
        mixed / mask-only).
 
@@ -50,12 +71,30 @@ class Corruptor:
     vocabulary / mask id live on the corruption scheme.
 
     Args:
-        rate: The rate policy.
-        select: The position selector.
-        corrupt: The corruption scheme.
-        special_token_ids: Ids that must never be masked. Pass ``[]`` for
-            none. Include every "do not corrupt" token (pad, bos/eos,
-            unknown, the mask id itself, tokenizer glyphs).
+        rate (RatePolicy): How much to select.
+        select (Selector): Which positions to select.
+        corrupt (CorruptionScheme): What to do with them.
+        special_token_ids (Sequence[int]): Ids that must never be masked.
+            Pass ``[]`` for none. Include every "do not corrupt" token (pad,
+            bos/eos, unknown, the mask id itself, tokenizer glyphs).
+
+    Raises:
+        TypeError: If a strategy has the wrong base class.
+        ValueError: If ``special_token_ids`` is None.
+
+    Example:
+        >>> import numpy as np
+        >>> from takumi.masking import BetaRate, Bernoulli, Mixed
+        >>> corruptor = Corruptor(
+        ...     rate=BetaRate(mean=0.15, concentration=4.0),
+        ...     select=Bernoulli(),
+        ...     corrupt=Mixed(0.8, 0.1, mask_token_id=3, valid_token_ids=range(4, 100)),
+        ...     special_token_ids=[0, 1, 2, 3],
+        ... )
+        >>> tokens = np.array([[1, 40, 41, 42, 43, 44, 45, 2]])
+        >>> result = corruptor(tokens, seed=0)
+        >>> result.sequences.shape, int(result.labels[0, 0])  # bos never selected
+        ((1, 8), -100)
     """
 
     def __init__(
@@ -86,40 +125,71 @@ class Corruptor:
         seed: int | None = None,
         excluded_ids: typing.Iterable[int] | None = None,
         focus: typing.Optional[backend.ArrayLike] = None,
-        timestep: typing.Union[int, float, None] = None,
+        timestep: typing.Union[int, float, backend.ArrayLike, None] = None,
         index: int | None = None,
     ) -> MaskingResult:
         """Corrupt a batch of token sequences.
 
         Args:
-            sequences: ``(B, L)`` token ids; NumPy array or CPU torch/JAX
-                tensor. The same type is returned.
-            seed: If given, makes the whole call bit-exact reproducible.
-            excluded_ids: Overrides ``special_token_ids`` for this call.
-            focus: Optional ``(B, L)`` bool mask of positions to bias
+            sequences (ArrayLike of int, shape (B, L)): Token ids; NumPy
+                array or CPU torch/JAX tensor. The same type is returned and
+                the input is never modified.
+            seed (int | None): If given, makes the whole call bit-exact
+                reproducible.
+            excluded_ids (Iterable[int] | None): Overrides
+                ``special_token_ids`` for this call.
+            focus (ArrayLike of bool, shape (B, L) | None): Positions to bias
                 selection toward; honored per the selector. None disables it.
-            timestep: Required by `ScheduleRate`; ignored by other rates.
-            index: Pins a candidate for `SampledRate`; ignored otherwise.
+            timestep (int | float | ArrayLike of float, shape (B,) | None):
+                Required by `ScheduleRate`, as a scalar or one per row;
+                ignored by other rates.
+            index (int | None): Pins a candidate for `SampledRate`; ignored
+                otherwise.
 
         Returns:
-            A `MaskingResult` — ``(sequences, labels, masked, mutated,
-            kept)`` — all sharing the input's shape and type. ``labels``
-            holds the original token at every selected position and ``-100``
+            MaskingResult: ``(sequences, labels, masked, mutated, kept)``,
+            all of shape ``(B, L)`` and the input's type. ``labels`` holds
+            the original token at every selected position and ``-100``
             elsewhere; ``masked`` / ``mutated`` / ``kept`` are boolean masks
             partitioning the selected positions by outcome.
+
+        Raises:
+            ValueError: If ``focus`` has the wrong shape, the rate policy
+                needs an argument that is missing, or it returns a per-row
+                rate whose length is not ``B``.
+
+        Example:
+            >>> import numpy as np
+            >>> from takumi.masking import Bernoulli, FixedRate, MaskOnly
+            >>> corruptor = Corruptor(FixedRate(0.5), Bernoulli(), MaskOnly(3), [0])
+            >>> tokens = np.array([[0, 7, 8, 9, 10, 11]])
+            >>> a = corruptor(tokens, seed=1)
+            >>> b = corruptor(tokens, seed=1)
+            >>> bool((a.sequences == b.sequences).all())  # same seed, same result
+            True
+            >>> bool(a.masked[0, 0])  # special id 0 is never selected
+            False
         """
         input_is_np = isinstance(sequences, np.ndarray)
-        arr = sequences if input_is_np else backend.to_numpy(sequences)
-        arr = arr.copy()
+        arr = backend.to_numpy(sequences).copy()
 
         focus_arr = coerce_focus(focus, arr.shape)
         seed = int(seed) if seed is not None else None
         rng = np.random.default_rng(seed)
         ctx = CallContext(
-            rng=rng, seed=seed, timestep=timestep, index=index
+            rng=rng,
+            seed=seed,
+            timestep=timestep,
+            index=index,
+            batch_size=arr.shape[0],
         )
 
         rate = self.rate(ctx)
+        if np.ndim(rate) != 0 and np.shape(rate) != (arr.shape[0],):
+            raise ValueError(
+                f"per-row rate must have shape ({arr.shape[0]},), got "
+                f"{np.shape(rate)}"
+            )
 
         excluded = (
             self.special_token_ids if excluded_ids is None else excluded_ids

@@ -2,12 +2,13 @@
 
 These exercise the public contract of ``takumi.masking``: reproducibility,
 special-token protection, the three corruption schemes, focus biasing, span
-selection, the outcome masks, and preset equivalence — independent of any
-particular tokenizer.
+selection, per-row rates, the outcome masks, preset equivalence, and MaskGIT
+training and decoding — independent of any particular tokenizer.
 """
 
 from __future__ import annotations
 
+import math
 import sys
 import types
 
@@ -38,14 +39,18 @@ from takumi.masking import Bernoulli
 from takumi.masking import CallContext
 from takumi.masking import Corruptor
 from takumi.masking import DiffusionMasker
+from takumi.masking import ExactCount
 from takumi.masking import FixedMasker
 from takumi.masking import FixedRate
 from takumi.masking import FocusBiased
 from takumi.masking import HybridSpanMasker
+from takumi.masking import MaskGITDecoder
+from takumi.masking import MaskGITMasker
 from takumi.masking import MaskOnly
 from takumi.masking import Mixed
 from takumi.masking import ScheduleRate
 from takumi.masking import Spans
+from takumi.masking import UniformTimestepRate
 from takumi.masking import focus_from_reference
 
 VOCAB = list(range(10, 60))
@@ -225,6 +230,39 @@ def test_diffusion_endpoints():
     assert np.all(lab_t != -100)                # every eligible masked at t=T
 
 
+def test_cosine_schedule_matches_maskgit():
+    # MaskGIT's gamma(r) = cos(r * pi / 2) at progress r = 1 - t / T. The
+    # endpoints alone cannot tell it from its mirror image 1 - cos(t*pi/2T),
+    # so check the midpoint and the mean too.
+    policy = ScheduleRate(100, "cosine")
+    assert policy.rate_at(50) == pytest.approx(math.sqrt(0.5))
+    mean = np.mean([policy.rate_at(t) for t in np.linspace(0, 100, 10001)])
+    assert mean == pytest.approx(2 / math.pi, abs=1e-3)
+
+
+def test_schedule_rate_per_row_timesteps():
+    corr = Corruptor(ScheduleRate(10), Bernoulli(), MaskOnly(MASK), SPECIALS)
+    labels = corr(_batch(rows=2), seed=1, timestep=np.array([0, 10])).labels
+    assert np.all(labels[0] == -100)
+    assert np.all(labels[1] != -100)
+
+
+def test_per_row_rate_must_match_batch():
+    corr = Corruptor(ScheduleRate(10), Bernoulli(), MaskOnly(MASK), SPECIALS)
+    with pytest.raises(ValueError):
+        corr(_batch(rows=2), seed=1, timestep=np.array([0, 5, 10]))
+
+
+def test_uniform_timestep_rate_draws_per_row():
+    policy = UniformTimestepRate("cosine")
+    ctx = CallContext(rng=np.random.default_rng(0), batch_size=20000)
+    rates = policy(ctx)
+    assert rates.shape == (20000,)
+    assert np.all((rates > 0.0) & (rates <= 1.0))
+    assert abs(rates.mean() - 2 / math.pi) < 0.01
+    assert rates.std() > 0.2  # rows really differ
+
+
 # --------------------------------------------------------------------------
 # focus biasing
 # --------------------------------------------------------------------------
@@ -251,6 +289,14 @@ def test_multiplicative_boosts_focus_rate():
     focus[:, :20] = True
     sel = corr(seq, seed=6, focus=focus).labels != -100
     assert sel[:, :20].mean() > sel[:, 20:].mean() * 2
+
+
+def test_focus_accepts_nested_lists():
+    corr = Corruptor(
+        FixedRate(1e-9), FocusBiased("force_include"), MaskOnly(MASK), SPECIALS
+    )
+    res = corr(_batch(rows=1, length=4), seed=0, focus=[[0, 1, 0, 1]])
+    assert (res.labels[0] != -100).tolist() == [False, True, False, True]
 
 
 def test_weighted_focus_strength_zero_does_not_crash():
@@ -312,6 +358,50 @@ def test_hybrid_span_supports_focus():
 
 
 # --------------------------------------------------------------------------
+# per-row rates & exact-count selection
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        Bernoulli(),
+        FocusBiased("multiplicative"),
+        FocusBiased("weighted"),
+        Spans(length_p=0.3, max_length=8),
+        ExactCount(),
+    ],
+    ids=["bernoulli", "multiplicative", "weighted", "spans", "exact"],
+)
+def test_selectors_honor_per_row_rates(select):
+    seq = _batch(rows=2)
+    seq[:, 0] = 0
+    eligible = seq != 0
+    focus = np.zeros_like(seq, dtype=bool)
+    focus[:, :10] = True
+    rates = np.array([0.0, 1.0])
+    sel = select(np.random.default_rng(0), rates, eligible, focus)
+    assert not sel[0].any()
+    assert np.array_equal(sel[1], eligible[1])
+
+
+def test_exact_count_selects_ceil_of_rate():
+    eligible = np.ones((3, 10), dtype=bool)
+    eligible[2, 5:] = False
+    rates = np.array([0.3, 0.01, 0.5])
+    sel = ExactCount()(np.random.default_rng(0), rates, eligible, None)
+    # 0.3 * 10 is 3 despite float error; ceil(0.1) = 1; ceil(0.5 * 5) = 3
+    assert sel.sum(axis=1).tolist() == [3, 1, 3]
+    assert not np.any(sel & ~eligible)
+
+
+def test_exact_count_is_uniform_over_positions():
+    eligible = np.ones((20000, 10), dtype=bool)
+    sel = ExactCount()(np.random.default_rng(0), 0.3, eligible, None)
+    assert np.all(sel.sum(axis=1) == 3)
+    assert np.all(np.abs(sel.mean(axis=0) - 0.3) < 0.02)
+
+
+# --------------------------------------------------------------------------
 # preset == explicit composition
 # --------------------------------------------------------------------------
 
@@ -328,6 +418,242 @@ def test_beta_preset_matches_explicit_composition():
     e = explicit(seq, seed=42)
     assert np.array_equal(p.sequences, e.sequences)
     assert np.array_equal(p.labels, e.labels)
+
+
+def test_maskgit_preset_matches_explicit_composition():
+    seq = _batch()
+    preset = MaskGITMasker(MASK, SPECIALS)
+    explicit = Corruptor(
+        UniformTimestepRate("cosine"), ExactCount(), MaskOnly(MASK), SPECIALS
+    )
+    p = preset(seq, seed=42)
+    e = explicit(seq, seed=42)
+    assert np.array_equal(p.sequences, e.sequences)
+    assert np.array_equal(p.labels, e.labels)
+
+
+# --------------------------------------------------------------------------
+# MaskGIT training & decoding
+# --------------------------------------------------------------------------
+
+def test_maskgit_masker_masks_each_row_at_its_own_rate():
+    seq = _batch(rows=2000, length=50)
+    seq[:, 0] = 0
+    res = MaskGITMasker(MASK, SPECIALS)(seq, seed=0)
+    selected = res.labels != -100
+    assert np.array_equal(res.masked, selected)
+    assert np.all(res.sequences[selected] == MASK)
+    assert not selected[:, 0].any()
+    per_row = selected.sum(axis=1)
+    assert per_row.min() >= 1
+    assert len(np.unique(per_row)) > 10
+    # ceil(cos schedule * 49 eligible): the mean sits just above 2 / pi
+    assert abs(per_row.mean() / 49 - 2 / math.pi) < 0.03
+
+
+def test_maskgit_decoder_unmasks_on_schedule():
+    steps, rows, length = 8, 4, 64
+    decoder = MaskGITDecoder(MASK, total_steps=steps)
+    rng = np.random.default_rng(0)
+    tokens = np.full((rows, length), MASK)
+    tokens[:, 0] = 0  # known prompt token
+    num_unknown = length - 1
+    unknown = num_unknown
+    for step in range(steps):
+        sampled = rng.integers(10, 60, size=(rows, length))
+        probs = rng.random((rows, length))
+        tokens = decoder(tokens, sampled, probs, step, num_unknown, seed=step)
+        assert np.all(tokens[:, 0] == 0)
+        if step < steps - 1:
+            ratio = math.cos(math.pi / 2 * (step + 1) / steps)
+            unknown = max(1, min(unknown - 1, int(num_unknown * ratio)))
+        else:
+            unknown = 0
+        assert np.all((tokens == MASK).sum(axis=1) == unknown)
+
+
+def test_maskgit_decoder_remasks_least_confident():
+    decoder = MaskGITDecoder(MASK, total_steps=2, temperature=0.0)
+    tokens = np.array([[42, MASK, MASK, MASK, MASK, MASK]])
+    sampled = np.array([[11, 12, 13, 14, 15, 16]])
+    probs = np.array([[0.0, 0.9, 0.1, 0.8, 0.2, 0.7]])
+    out = decoder(tokens, sampled, probs, step=0, num_unknown=5)
+    # floor(5 * cos(pi / 4)) = 3 re-masked: the three lowest probabilities
+    # among unknowns. The known token keeps its value despite prob 0.
+    assert out.tolist() == [[42, 12, MASK, 14, MASK, MASK]]
+
+
+def _decode_step_inputs(rng, shape, vocab=16):
+    logits = rng.normal(size=shape + (vocab,)).astype(np.float32)
+    sampled, probs = backend.sample(logits, mask_token_id=3)
+    return logits, backend.to_numpy(sampled), backend.to_numpy(probs)
+
+
+def test_remask_outside_window_matches_plain_decoding():
+    plain = MaskGITDecoder(3, total_steps=4)
+    # progress is 0.25, 0.5, 0.75, 1.0: never inside (0.9, 0.95)
+    remask = MaskGITDecoder(3, total_steps=4, remask_prob=1.0,
+                            remask_window=(0.9, 0.95))
+    rng = np.random.default_rng(0)
+    a = b = np.full((2, 16), 3)
+    generated = a == 3
+    for step in range(4):
+        _, sampled, probs = _decode_step_inputs(rng, (2, 16))
+        a = plain(a, sampled, probs, step, 16, seed=step)
+        b = remask(b, sampled, probs, step, 16, seed=step, generated=generated)
+        assert np.array_equal(a, b)
+
+
+def test_remask_sends_committed_tokens_back():
+    decoder = MaskGITDecoder(3, total_steps=4, remask_prob=1.0,
+                             remask_window=(0.5, 0.5))  # step 1 only
+    rng = np.random.default_rng(0)
+    tokens = np.full((2, 16), 3)
+    generated = tokens == 3
+    _, sampled, probs = _decode_step_inputs(rng, (2, 16))
+    tokens = decoder(tokens, sampled, probs, 0, 16, seed=0, generated=generated)
+    committed = tokens != 3
+    assert committed.any()
+    _, sampled, probs = _decode_step_inputs(rng, (2, 16))
+    tokens = decoder(tokens, sampled, probs, 1, 16, seed=1, generated=generated)
+    assert np.all(tokens[committed] == 3)
+
+
+def test_remask_never_touches_prompt_tokens():
+    decoder = MaskGITDecoder(3, total_steps=6, remask_prob=1.0,
+                             remask_window=(0.0, 1.0))
+    rng = np.random.default_rng(0)
+    tokens = np.full((2, 16), 3)
+    tokens[:, :4] = 42  # prompt
+    generated = tokens == 3
+    for step in range(6):
+        _, sampled, probs = _decode_step_inputs(rng, (2, 16))
+        tokens = decoder(tokens, sampled, probs, step, 12, seed=step,
+                         generated=generated)
+        assert np.all(tokens[:, :4] == 42)
+    assert not np.any(tokens == 3)  # the last step still reveals everything
+
+
+def test_remask_with_current_probs_picks_least_confident():
+    decoder = MaskGITDecoder(3, total_steps=4, remask_prob=0.5,
+                             remask_window=(0.5, 0.5))
+    rng = np.random.default_rng(0)
+    tokens = np.full((8, 32), 3)
+    generated = tokens == 3
+    _, sampled, probs = _decode_step_inputs(rng, (8, 32))
+    tokens = decoder(tokens, sampled, probs, 0, 32, seed=0, generated=generated)
+    committed = tokens != 3
+    current = rng.random((8, 32))
+    _, sampled, probs = _decode_step_inputs(rng, (8, 32))
+    out = decoder(tokens, sampled, probs, 1, 32, seed=1, generated=generated,
+                  current_probs=current)
+    remasked = committed & (out == 3)
+    kept = committed & (out != 3)
+    assert remasked.any()
+    for b in range(8):
+        if remasked[b].any() and kept[b].any():
+            assert current[b][remasked[b]].max() <= current[b][kept[b]].min()
+
+
+def test_remask_requires_generated():
+    decoder = MaskGITDecoder(3, total_steps=4, remask_prob=0.2)
+    tokens = np.full((1, 8), 3)
+    with pytest.raises(ValueError):
+        decoder(tokens, tokens, np.ones((1, 8)), 0, 8)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"remask_prob": 1.5}, {"remask_prob": -0.1},
+     {"remask_window": (0.8, 0.2)}, {"remask_window": (0.5, 1.2)}],
+)
+def test_remask_rejects_bad_settings(kwargs):
+    with pytest.raises(ValueError):
+        MaskGITDecoder(3, total_steps=4, **kwargs)
+
+
+def test_backend_token_probs_matches_softmax_and_zeroes_out_of_vocab():
+    logits = np.random.default_rng(0).normal(size=(2, 5, 4)).astype(np.float32)
+    tokens = np.array([[0, 1, 2, 3, 4], [3, 2, 1, 0, 4]])  # 4 is outside V=4
+    probs = backend.to_numpy(backend.token_probs(logits, tokens))
+    softmax = np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)
+    expected = np.take_along_axis(
+        softmax, np.minimum(tokens, 3)[..., None], axis=-1
+    )[..., 0]
+    expected[tokens >= 4] = 0.0
+    assert probs.shape == (2, 5)
+    assert np.allclose(probs, expected, atol=1e-6)
+
+
+def test_backend_sample_accepts_mask_id_outside_vocab():
+    logits = np.zeros((1, 4, 8), dtype=np.float32)
+    sampled, _ = backend.sample(logits, mask_token_id=8, seed=0)  # id == V
+    assert backend.to_numpy(sampled).shape == (1, 4)
+
+
+def test_backend_sample_greedy_returns_untempered_probs():
+    logits = np.array([[[0.0, 5.0, 1.0], [9.0, 0.0, 0.0]]], dtype=np.float32)
+    sampled, probs = backend.sample(logits, temperature=0.0)
+    assert backend.to_numpy(sampled).tolist() == [[1, 0]]
+    softmax = np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)
+    expected = [[softmax[0, 0, 1], softmax[0, 1, 0]]]
+    assert np.allclose(backend.to_numpy(probs), expected, atol=1e-6)
+
+
+def test_backend_sample_never_draws_mask_id():
+    logits = np.zeros((4, 32, 8), dtype=np.float32)
+    logits[..., 2] = 10.0  # the mask id is by far the most likely
+    sampled, _ = backend.sample(logits, mask_token_id=2, seed=0)
+    assert not np.any(backend.to_numpy(sampled) == 2)
+
+
+def test_backend_sample_follows_distribution_and_seed():
+    row = np.log(np.array([0.7, 0.2, 0.1], dtype=np.float32))
+    logits = np.broadcast_to(row, (1, 20000, 3)).copy()
+    a, _ = backend.sample(logits, seed=0)
+    b, _ = backend.sample(logits, seed=0)
+    a = backend.to_numpy(a)
+    assert a.shape == (1, 20000)
+    assert np.array_equal(a, backend.to_numpy(b))
+    freq = np.bincount(a.ravel(), minlength=3) / a.size
+    assert np.allclose(freq, [0.7, 0.2, 0.1], atol=0.02)
+
+
+def test_backend_sample_rejects_negative_temperature():
+    with pytest.raises(ValueError):
+        backend.sample(np.zeros((1, 2, 3), dtype=np.float32), temperature=-1.0)
+
+
+def test_backend_sample_drives_decoder_to_completion():
+    steps, mask = 6, 3
+    decoder = MaskGITDecoder(mask, total_steps=steps)
+    rng = np.random.default_rng(0)
+    tokens = np.full((2, 32), mask)
+    for step in range(steps):
+        logits = rng.normal(size=(2, 32, 16)).astype(np.float32)
+        sampled, probs = backend.sample(logits, mask_token_id=mask, seed=step)
+        tokens = decoder(tokens, sampled, probs, step, 32, seed=step)
+    assert not np.any(tokens == mask)
+
+
+@pytest.mark.skipif(
+    ACTIVE_BACKEND != "torch",
+    reason=f"needs the torch backend; TAKUMI_MASKING_BACKEND selected "
+    f"{ACTIVE_BACKEND!r}",
+)
+def test_maskgit_decoder_torch_roundtrip():
+    torch = pytest.importorskip("torch")
+    decoder = MaskGITDecoder(MASK, total_steps=4)
+    tokens = np.full((2, 16), MASK)
+    sampled = np.random.default_rng(0).integers(10, 60, size=(2, 16))
+    probs = np.random.default_rng(1).random((2, 16))
+    n = decoder(tokens, sampled, probs, 0, 16, seed=3)
+    t = decoder(
+        torch.as_tensor(tokens), torch.as_tensor(sampled),
+        torch.as_tensor(probs), 0, 16, seed=3,
+    )
+    assert isinstance(t, torch.Tensor)
+    assert np.array_equal(t.numpy(), n)
 
 
 # --------------------------------------------------------------------------

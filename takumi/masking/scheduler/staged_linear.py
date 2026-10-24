@@ -10,6 +10,24 @@ class StagedLinearScheduler(Scheduler):
     Staged curriculum scheduler that introduces masking difficulties
     sequentially. Each stage introduces a new difficulty level, ramping
     its weight linearly from 0 to equal weight with existing difficulties.
+
+    Args:
+        num_stages (int): Number of difficulties (candidates), ``> 0``.
+        total_steps (int): Steps until every stage is fully ramped, at least
+            ``num_stages``.
+
+    Raises:
+        ValueError: If either argument is not positive, or ``total_steps <
+            num_stages``.
+
+    Example:
+        >>> scheduler = StagedLinearScheduler(num_stages=2, total_steps=10)
+        >>> scheduler.sample()  # only the first stage at the start
+        [1.0, 0.0]
+        >>> for _ in range(10):
+        ...     scheduler.step()
+        >>> scheduler.sample()
+        [0.5, 0.5]
     """
 
     def __init__(
@@ -32,7 +50,21 @@ class StagedLinearScheduler(Scheduler):
         self.total_steps = total_steps
 
     def sample(self) -> List[float]:
-        """Return the staged weights for all masking difficulties."""
+        """Return the staged weights for all masking difficulties.
+
+        Stage ``i`` ramps from 0 to 1 over steps ``[i * T / S, (i + 1) * T /
+        S)``; the weights are then normalized to sum to 1.
+
+        Returns:
+            list[float], length num_stages: Normalized weights.
+
+        Example:
+            >>> scheduler = StagedLinearScheduler(num_stages=2, total_steps=10)
+            >>> for _ in range(7):
+            ...     scheduler.step()
+            >>> [round(w, 3) for w in scheduler.sample()]  # stage 2 at 40%
+            [0.714, 0.286]
+        """
 
         current_step = min(self.current_step.get(), self.total_steps)
 

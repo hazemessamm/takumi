@@ -20,6 +20,32 @@ _PERCENTILES = (50, 90, 99)
 
 @dataclass(repr=False)
 class PackingReport:
+    """How fully a packing used its bins.
+
+    Build one with ``from_bins`` (concrete packers) or ``from_templates``
+    (histogram packers); both give directly comparable numbers.
+
+    Attributes:
+        n_bins (int): Number of bins.
+        n_sequences (int): Number of sequences across all bins.
+        total_tokens (int): Sum of all sequence lengths.
+        total_capacity (int): ``n_bins * max_length``.
+        padding_tokens (int): ``total_capacity - total_tokens``.
+        efficiency (float): ``total_tokens / total_capacity``, in ``[0, 1]``.
+        padding_ratio (float): ``1 - efficiency``.
+        bin_fullness_p50 (float): Median bin fullness, as a fraction.
+        bin_fullness_p90 (float): 90th-percentile bin fullness.
+        bin_fullness_p99 (float): 99th-percentile bin fullness.
+        max_length (int): Bin capacity in tokens.
+
+    Example:
+        >>> from takumi.packing import pack
+        >>> lengths = [7, 6, 5, 4, 3, 2]
+        >>> report = PackingReport.from_bins(pack(lengths, 10), lengths, 10)
+        >>> report.n_bins, report.padding_tokens, report.efficiency
+        (3, 3, 0.9)
+    """
+
     n_bins: int
     n_sequences: int
     total_tokens: int
@@ -40,7 +66,21 @@ class PackingReport:
         max_length: int,
     ) -> "PackingReport":
         """Summarize a ``list[list[int]]`` packing (``pack_first_fit`` /
-        ``pack_worst_fit``), where each bin lists indices into ``lengths``."""
+        ``pack_worst_fit``), where each bin lists indices into ``lengths``.
+
+        Args:
+            bins (list[list[int]]): Bins of indices into ``lengths``.
+            lengths (list[int], length N): Sequence lengths.
+            max_length (int): Bin capacity in tokens.
+
+        Returns:
+            PackingReport: The packing's statistics.
+
+        Example:
+            >>> report = PackingReport.from_bins([[0, 1], [2]], [6, 4, 5], 10)
+            >>> report.n_bins, report.total_tokens, report.bin_fullness_p50
+            (2, 15, 0.5)
+        """
         lengths_arr = np.asarray(lengths, dtype=np.int64)
         bin_sums = np.fromiter(
             (int(lengths_arr[bin_].sum()) for bin_ in bins),
@@ -59,7 +99,22 @@ class PackingReport:
         max_length: int,
     ) -> "PackingReport":
         """Summarize a ``{template: count}`` packing (``pack_histogram``), where
-        a template is a tuple of the lengths sharing a bin."""
+        a template is a tuple of the lengths sharing a bin.
+
+        Args:
+            templates (Mapping[tuple[int, ...], int]): Bin layout to bin
+                count.
+            max_length (int): Bin capacity in tokens.
+
+        Returns:
+            PackingReport: The packing's statistics, computed without
+            expanding to one entry per bin.
+
+        Example:
+            >>> report = PackingReport.from_templates({(6, 4): 3, (5,): 1}, 10)
+            >>> report.n_bins, report.n_sequences, report.efficiency
+            (4, 7, 0.875)
+        """
         items = list(templates.items())
         bin_sums = np.fromiter(
             (sum(template) for template, _ in items),
@@ -83,7 +138,25 @@ class PackingReport:
         max_length: int,
     ) -> "PackingReport":
         """Assemble the stats from a weighted distribution of per-bin token
-        sums. Both public constructors funnel through here."""
+        sums. Both public constructors funnel through here.
+
+        Args:
+            bin_sums (np.ndarray of int, shape (K,)): Token sum of each
+                distinct bin.
+            multiplicity (np.ndarray of int, shape (K,)): How many bins have
+                each sum.
+            n_sequences (int): Total sequences across all bins.
+            max_length (int): Bin capacity in tokens.
+
+        Returns:
+            PackingReport: The assembled statistics.
+
+        Example:
+            >>> import numpy as np
+            >>> report = PackingReport._reduce(np.array([10, 5]), np.array([3, 1]), 7, 10)
+            >>> report.total_capacity, report.padding_tokens
+            (40, 5)
+        """
         n_bins = int(multiplicity.sum())
         total_tokens = int((bin_sums * multiplicity).sum())
         total_capacity = n_bins * max_length
@@ -106,6 +179,20 @@ class PackingReport:
         )
 
     def __repr__(self) -> str:
+        """Four-line human-readable summary.
+
+        Returns:
+            str: Bin and sequence counts, token efficiency, fullness
+            percentiles, and capacity.
+
+        Example:
+            >>> from takumi.packing import pack
+            >>> print(pack([7, 6, 5, 4, 3, 2], 10, algorithm="histogram").report())
+            PackingReport: 3 bins, 6 sequences (2.00 avg/bin)
+              tokens     27/30 used (efficiency 90.00%, padding 10.00%)
+              fullness   p50 90.0% | p90 90.0% | p99 90.0%
+              max_length 10
+        """
         avg_per_bin = self.n_sequences / self.n_bins if self.n_bins else 0.0
         return (
             f"PackingReport: {self.n_bins:,} bins, {self.n_sequences:,} sequences "
@@ -128,6 +215,22 @@ def _fullness_percentiles(
 
     Operates on the distinct ``(sum, count)`` pairs via a cumulative-weight
     search, so the template path never expands to one entry per bin.
+
+    Args:
+        bin_sums (np.ndarray of int, shape (K,)): Token sum of each distinct
+            bin.
+        multiplicity (np.ndarray of int, shape (K,)): How many bins have each
+            sum.
+        max_length (int): Bin capacity in tokens.
+
+    Returns:
+        tuple[float, float, float]: Fullness at p50, p90, and p99; all zero
+        for an empty packing.
+
+    Example:
+        >>> import numpy as np
+        >>> _fullness_percentiles(np.array([5, 10]), np.array([3, 1]), 10)
+        (0.5, 1.0, 1.0)
     """
     if bin_sums.size == 0 or max_length == 0:
         return (0.0, 0.0, 0.0)

@@ -20,14 +20,32 @@ class MLMProbabilitySampler:
       3. Else draw an index uniformly at random from the candidates.
 
     Args:
-        mlm_probs: Candidate masking rates.
-        masking_probs: Candidate fractions of MLM positions replaced
-            with the mask token, paired by index with `mlm_probs`.
-        mutation_probs: Candidate fractions of MLM positions replaced
-            with a random valid token, paired by index with `mlm_probs`.
-        scheduler: Optional object with `sample() -> weights` and
-            `step()` / `reset()` methods. Weights are used as the
-            categorical distribution over the candidate indices.
+        mlm_probs (Sequence[float], length N): Candidate masking rates.
+        masking_probs (Sequence[float], length N): Candidate fractions of
+            MLM positions replaced with the mask token, paired by index with
+            `mlm_probs`.
+        mutation_probs (Sequence[float], length N): Candidate fractions of
+            MLM positions replaced with a random valid token, paired by
+            index with `mlm_probs`.
+        scheduler (Scheduler | None): Optional object with
+            `sample() -> weights` and `step()` / `reset()` methods. Weights
+            are used as the categorical distribution over the candidate
+            indices.
+
+    Raises:
+        ValueError: If the lists are empty, differ in length, or hold
+            negative values.
+
+    Example:
+        >>> sampler = MLMProbabilitySampler(
+        ...     mlm_probs=[0.15, 0.3, 0.5],
+        ...     masking_probs=[0.8, 0.8, 1.0],
+        ...     mutation_probs=[0.1, 0.1, 0.0],
+        ... )
+        >>> sampler.sample(index=2)
+        (0.5, 1.0, 0.0)
+        >>> sampler.sample(seed=0) in [(0.15, 0.8, 0.1), (0.3, 0.8, 0.1), (0.5, 1.0, 0.0)]
+        True
     """
 
     def __init__(
@@ -57,17 +75,74 @@ class MLMProbabilitySampler:
 
     @property
     def num_candidates(self) -> int:
+        """Number of candidate triples, ``N``.
+
+        Returns:
+            int: Length of the candidate lists.
+
+        Example:
+            >>> MLMProbabilitySampler([0.1, 0.2], [0.8, 0.8], [0.1, 0.1]).num_candidates
+            2
+        """
         return len(self.mlm_probs)
 
     def step(self):
+        """Advance the scheduler by one step; a no-op without one.
+
+        Returns:
+            None
+
+        Example:
+            >>> from takumi.masking import LinearScheduler
+            >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=1)
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
+            >>> sampler.sample(seed=0)[0]
+            0.1
+            >>> sampler.step()
+            >>> sampler.sample(seed=0)[0]
+            0.5
+        """
         if self.scheduler is not None:
             self.scheduler.step()
 
     def reset(self):
+        """Rewind the scheduler to its first step; a no-op without one.
+
+        Returns:
+            None
+
+        Example:
+            >>> from takumi.masking import LinearScheduler
+            >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=1)
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
+            >>> sampler.step()
+            >>> sampler.reset()
+            >>> sampler.sample(seed=0)[0]
+            0.1
+        """
         if self.scheduler is not None:
             self.scheduler.reset()
 
     def sample_from_scheduler(self, seed: int | None = None) -> int:
+        """Draw a candidate index from the scheduler's current weights.
+
+        Args:
+            seed (int | None): Seed for the draw.
+
+        Returns:
+            int: An index in ``[0, N)``. All-zero weights fall back to a
+            uniform draw.
+
+        Raises:
+            ValueError: If the scheduler returns negative weights.
+
+        Example:
+            >>> from takumi.masking import LinearScheduler
+            >>> scheduler = LinearScheduler([0.0, 1.0], [0.0, 1.0], total_steps=1)
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
+            >>> sampler.sample_from_scheduler(seed=0)
+            1
+        """
         rng = np.random.default_rng(seed)
         weights = np.asarray(self.scheduler.sample(), dtype=np.float64)
         ensure_non_negative(weights, name="scheduler weights")
@@ -78,6 +153,19 @@ class MLMProbabilitySampler:
         return int(rng.integers(0, self.num_candidates))
 
     def sample_randomly(self, seed: int | None = None) -> int:
+        """Draw a candidate index uniformly at random.
+
+        Args:
+            seed (int | None): Seed for the draw.
+
+        Returns:
+            int: An index in ``[0, N)``.
+
+        Example:
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1])
+            >>> sampler.sample_randomly(seed=0) in (0, 1)
+            True
+        """
         rng = np.random.default_rng(seed)
         return int(rng.integers(0, self.num_candidates))
 
@@ -86,6 +174,25 @@ class MLMProbabilitySampler:
         seed: int | None = None,
         index: int | None = None,
     ) -> typing.Tuple[float, float, float]:
+        """Pick a candidate triple: pinned, scheduled, or uniform.
+
+        Args:
+            seed (int | None): Seed for the draw; ignored when ``index`` is
+                given.
+            index (int | None): Pins the candidate, in ``[0, N)``.
+
+        Returns:
+            tuple[float, float, float]: ``(mlm_prob, masking_prob,
+            mutation_prob)``.
+
+        Raises:
+            ValueError: If ``index`` is out of range.
+
+        Example:
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 1.0], [0.1, 0.0])
+            >>> sampler.sample(index=1)
+            (0.5, 1.0, 0.0)
+        """
         if index is not None:
             if index < 0 or index >= self.num_candidates:
                 raise ValueError(

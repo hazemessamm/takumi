@@ -386,17 +386,27 @@ Sorts sequences longest first, then places each into the first (oldest) open
 bin that still has room, opening a fresh bin when none fits.
 
 Args:
-    lengths: sequence lengths (list[int]).
-    max_length: maximum packed length.
-    tolerance: length-bucket width for sort ordering.
-    seed: RNG seed for intra-bucket shuffle.
+    lengths (Sequence[int], length N): Sequence lengths, each at most
+        ``max_length``.
+    max_length (int): Bin capacity in tokens.
+    tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
+        lengths in the same bucket count as ties.
+    seed (int | None): Shuffles ties reproducibly on a given platform;
+        ``None`` breaks ties by original index.
 
 Returns:
-    list[list[int]]: bins, each a list of indices into ``lengths``.
+    list[list[int]]: Bins, each a list of indices into ``lengths``.
 
 Raises:
     ValueError: if ``tolerance`` is below 1, or any length exceeds
         ``max_length``.
+
+Example:
+    >>> pack_first_fit([7, 6, 5, 4, 3, 2], max_length=10)
+    [[0, 4], [1, 3], [2, 5]]
+    >>> a = pack_first_fit([7, 6, 5, 4, 3, 2], 10, tolerance=2, seed=42)
+    >>> a == pack_first_fit([7, 6, 5, 4, 3, 2], 10, tolerance=2, seed=42)
+    True
 )doc");
 
     m.def("pack_worst_fit", &pack_worst_fit,
@@ -412,41 +422,71 @@ the first one that fits. A max-heap keyed on remaining capacity makes that
 choice O(log n) per sequence.
 
 Args:
-    lengths: sequence lengths (list[int]).
-    max_length: maximum packed length.
-    tolerance: length-bucket width for sort ordering.
-    seed: RNG seed for intra-bucket shuffle.
+    lengths (Sequence[int], length N): Sequence lengths, each at most
+        ``max_length``.
+    max_length (int): Bin capacity in tokens.
+    tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
+        lengths in the same bucket count as ties.
+    seed (int | None): Shuffles ties reproducibly on a given platform;
+        ``None`` breaks ties by original index.
 
 Returns:
-    list[list[int]]: bins, each a list of indices into ``lengths``.
+    list[list[int]]: Bins, each a list of indices into ``lengths``.
 
 Raises:
     ValueError: if ``tolerance`` is below 1, or any length exceeds
         ``max_length``.
+
+Example:
+    >>> pack_worst_fit([7, 6, 5, 4, 3, 2], max_length=10)
+    [[0, 5], [1, 4], [2, 3]]
 )doc");
 
     m.def("group_by_size", &group_by_size,
           nb::arg("lengths"),
           nb::arg("max_length") = nb::none(),
           R"doc(Compute a histogram of sequence lengths and a mapping from lengths to indices.
+
 Args:
-    lengths: sequence lengths (list[int]).
-    max_length: optional maximum length to clip lengths to.
+    lengths (Sequence[int], length N): Sequence lengths.
+    max_length (int | None): If given, lengths above it are clipped to it.
+
 Returns:
-    Tuple of (counts, length_to_indices):
-        counts: dict mapping length to count of occurrences.
-        length_to_indices: dict mapping length to list of indices in the original lengths list.
+    tuple[dict[int, int], dict[int, list[int]]]: ``(counts,
+    length_to_indices)``: how many sequences have each length, and their
+    indices in ascending order. Key order is unspecified.
+
+Example:
+    >>> counts, pools = group_by_size([3, 5, 3, 9], max_length=8)
+    >>> sorted(counts.items())  # 9 was clipped to 8
+    [(3, 2), (5, 1), (8, 1)]
+    >>> pools[3]
+    [0, 2]
 )doc");
 
     m.def("pack_histogram", &pack_histogram,
           nb::arg("counts"),
           nb::arg("max_length"),
           R"doc(Pack a histogram of sequence lengths into bins.
+
+Worst-fit-decreasing over lengths rather than individual sequences, so the
+result is a reusable blueprint of bin layouts.
+
 Args:
-    counts: dict mapping length to count of occurrences.
-    max_length: maximum packed length.
+    counts (Mapping[int, int]): Length to how many sequences have it; each
+        length at most ``max_length``.
+    max_length (int): Bin capacity in tokens.
+
 Returns:
-    dict mapping tuple of lengths in a bin to count of such bins.
+    dict[tuple[int, ...], int]: Bin layout (the lengths sharing a bin,
+    longest first) to how many bins use it, in sorted key order.
+
+Raises:
+    ValueError: if any length exceeds ``max_length``.
+
+Example:
+    >>> pack_histogram({7: 1, 6: 1, 5: 1, 4: 1, 3: 1, 2: 1}, max_length=10)
+    {(5, 4): 1, (6, 3): 1, (7, 2): 1}
 )doc");
 
     m.def("pack_histogram_batched", &pack_histogram_batched,
@@ -461,9 +501,19 @@ count matches on realistic inputs, differs by at most one bin on adversarial
 ones); its templates tend to group more identical lengths per bin.
 
 Args:
-    counts: dict mapping length to count of occurrences.
-    max_length: maximum packed length.
+    counts (Mapping[int, int]): Length to how many sequences have it; each
+        length at most ``max_length``.
+    max_length (int): Bin capacity in tokens.
+
 Returns:
-    dict mapping tuple of lengths in a bin to count of such bins.
+    dict[tuple[int, ...], int]: Bin layout (the lengths sharing a bin,
+    longest first) to how many bins use it, in sorted key order.
+
+Raises:
+    ValueError: if any length exceeds ``max_length``.
+
+Example:
+    >>> pack_histogram_batched({2: 10, 3: 4}, max_length=8)
+    {(2, 2, 2, 2): 2, (3, 3, 2): 2}
 )doc");
 }

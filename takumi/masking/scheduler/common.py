@@ -5,6 +5,25 @@ from typing import List
 
 
 def validate_lengths(*lists: List) -> None:
+    """Require two or more lists, all of the same length.
+
+    Args:
+        *lists (Sequence): The lists to compare.
+
+    Returns:
+        None
+
+    Raises:
+        ValueError: If fewer than two lists are given or their lengths
+            differ.
+
+    Example:
+        >>> validate_lengths([1, 2], [3, 4])
+        >>> validate_lengths([1, 2], [3])
+        Traceback (most recent call last):
+        ...
+        ValueError: All lists must have the same length. Received [2, 1].
+    """
     if len(lists) < 2:
         raise ValueError("At least two lists must be provided for validation.")
     if not all(len(lst) == len(lists[0]) for lst in lists):
@@ -33,6 +52,17 @@ class SharedCounter:
 
     Do not "simplify" this back to ``mp.Value(...)``; see
     tests/test_scheduler_multiprocessing.py.
+
+    Args:
+        initial_value (int): Starting value, restored by ``reset``.
+        final_value (int): Ceiling; ``step`` never goes past it.
+
+    Example:
+        >>> counter = SharedCounter(initial_value=0, final_value=2)
+        >>> for _ in range(5):
+        ...     counter.step()
+        >>> counter.value  # clamped at final_value
+        2
     """
 
     def __init__(self, initial_value: int, final_value: int):
@@ -41,19 +71,63 @@ class SharedCounter:
         self._value = mp.get_context("spawn").Value("i", initial_value)
 
     def step(self):
+        """Increment by one under the lock, stopping at ``final_value``.
+
+        Returns:
+            None
+
+        Example:
+            >>> counter = SharedCounter(0, 10)
+            >>> counter.step()
+            >>> counter.get()
+            1
+        """
         with self._value.get_lock():
             current_value = self._value.value
             new_value = min(current_value + 1, self.final_value)
             self._value.value = new_value
 
     def get(self):
+        """Current value.
+
+        Returns:
+            int: The shared value.
+
+        Example:
+            >>> SharedCounter(3, 10).get()
+            3
+        """
         return self._value.value
 
     def reset(self):
+        """Set the value back to ``initial_value`` under the lock.
+
+        Returns:
+            None
+
+        Example:
+            >>> counter = SharedCounter(0, 10)
+            >>> counter.step()
+            >>> counter.reset()
+            >>> counter.get()
+            0
+        """
         with self._value.get_lock():
             self._value.value = self.initial_value
 
     def __repr__(self):
+        """Show the current value and both bounds.
+
+        Returns:
+            str: For example ``SharedCounter(value=1, initial_value=0,
+            final_value=5)``.
+
+        Example:
+            >>> counter = SharedCounter(0, 5)
+            >>> counter.step()
+            >>> counter
+            SharedCounter(value=1, initial_value=0, final_value=5)
+        """
         return (
             f"SharedCounter(value={self.value}, "
             f"initial_value={self.initial_value}, "
@@ -62,4 +136,13 @@ class SharedCounter:
 
     @property
     def value(self):
+        """Current value; same as ``get()``.
+
+        Returns:
+            int: The shared value.
+
+        Example:
+            >>> SharedCounter(4, 10).value
+            4
+        """
         return self.get()
