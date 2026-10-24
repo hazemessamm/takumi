@@ -4,10 +4,13 @@
 templates and per-length index pools produced by the histogram packers — and
 yields its bins for a single epoch, drawing dataset indices from the pools
 without replacement so every sequence appears exactly once. All randomness
-flows through numpy's ``default_rng(seed)``, so a given seed reproduces the
-same epoch on every platform and numpy version — the reason this stays in
-Python rather than the C++ core, whose ``std::`` distributions are not
-portably reproducible.
+flows through numpy's ``default_rng(seed)``, and the inputs are read in sorted
+order rather than dict order, so a given seed reproduces the same epoch on
+every platform — the reason this stays in Python rather than the C++ core,
+whose ``std::`` distributions are not portably reproducible. NumPy freezes
+its bit generators but not the output of ``Generator`` methods across
+releases (NEP 19); tests/test_stream.py pins a golden epoch so CI notices if
+an upgrade ever changes it.
 
 Most callers reach this through ``PackingPlan.iter_bins``, which carries the
 two mappings around as one object; this module works on the raw data and knows
@@ -42,7 +45,7 @@ def stream_packed_bins(
             dataset indices that have it.
         seed (int | None): Seed for both the per-length draw order and the
             layout emission order. The same seed reproduces the same epoch
-            exactly.
+            exactly, whatever order the two mappings list their entries in.
         interleave (bool): When ``False`` (default) every bin of one layout is emitted
             back-to-back in a seed-shuffled layout order — cheap, only
             ``O(distinct layouts)`` of state. When ``True`` the individual bins
@@ -63,16 +66,19 @@ def stream_packed_bins(
         ...     seed=0,
         ... )
         >>> list(bins)
-        [[0, 1], [2, 3]]
+        [[2, 3], [0, 1]]
     """
     rng = np.random.default_rng(seed)
 
     # One exhaustible, pre-shuffled stream of indices per length. Consuming it
     # with ``next()`` keeps the "already used" bookkeeping implicit inside the
-    # iterator instead of in a parallel table of offsets.
+    # iterator instead of in a parallel table of offsets. Pools are shuffled
+    # in length order, each from its sorted indices, so the draws depend only
+    # on the pools' contents: dict order varies between C++ standard
+    # libraries, and a caller may list indices in any order.
     draw: dict[int, Iterator] = {
-        length: iter(rng.permutation(np.asarray(members)))
-        for length, members in index_pools.items()
+        length: iter(rng.permutation(np.sort(np.asarray(index_pools[length]))))
+        for length in sorted(index_pools)
     }
 
     for layout in _emission_order(templates, rng, interleave):
@@ -98,8 +104,9 @@ def _emission_order(
 
     Grouped (``interleave=False``): shuffle the distinct layouts, then repeat
     each ``count`` times. Interleaved: expand to one entry per bin and shuffle
-    the whole run. Both orderings are produced by ``rng.permutation`` over an
-    index range, so the sequence is a pure function of the seed.
+    the whole run. Both orderings are produced by ``rng.permutation`` over the
+    layouts in sorted order, so the sequence is a pure function of the seed
+    and the layouts' contents.
 
     Args:
         layouts (Mapping[tuple[int, ...], int]): Bin layout to bin count.
@@ -114,11 +121,11 @@ def _emission_order(
         >>> import numpy as np
         >>> layouts = {(6, 4): 2, (5, 5): 1}
         >>> list(_emission_order(layouts, np.random.default_rng(0), interleave=False))
-        [(6, 4), (6, 4), (5, 5)]
-        >>> list(_emission_order(layouts, np.random.default_rng(0), interleave=True))
         [(5, 5), (6, 4), (6, 4)]
+        >>> list(_emission_order(layouts, np.random.default_rng(0), interleave=True))
+        [(6, 4), (5, 5), (6, 4)]
     """
-    distinct = list(layouts.keys())
+    distinct = sorted(layouts)
 
     if interleave:
         expanded = [

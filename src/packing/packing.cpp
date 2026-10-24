@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>  // std::make_move_iterator
 #include <optional>
 #include <stdexcept>
 #include <string>   // std::to_string — pulled in transitively by libstdc++/libc++, but not by MSVC
@@ -29,6 +30,7 @@
 #include <nanobind/stl/optional.h>  // enables std::optional <-> None|value casts
 #include <nanobind/stl/vector.h>    // enables automatic std::vector <-> list casts
 #include <nanobind/stl/unordered_map.h>  // enables automatic std::unordered_map <-> dict casts
+#include <nanobind/stl/map.h>  // enables automatic std::map -> dict casts (sorted keys)
 #include <nanobind/stl/tuple.h>  // enables automatic std::tuple <-> tuple casts
 
 
@@ -209,7 +211,11 @@ std::vector<std::vector<std::int64_t>> pack_worst_fit(
     }
 
 
-    std::tuple<std::unordered_map<std::int64_t, std::int64_t>, std::unordered_map<std::int64_t, std::vector<std::int64_t>>> group_by_size(
+    // Counts in hash maps (O(1) per sequence), then returns std::maps so Python
+    // sees ascending keys everywhere: unordered_map iteration order differs
+    // between libstdc++, libc++ and MSVC. The copy is O(k log k) over the k
+    // distinct lengths, negligible next to the O(n) pass.
+    std::tuple<std::map<std::int64_t, std::int64_t>, std::map<std::int64_t, std::vector<std::int64_t>>> group_by_size(
         std::vector<std::int64_t>& lengths, std::optional<std::int64_t> max_length = std::nullopt) {
             if (max_length.has_value()) {
                 for (std::size_t i = 0; i < lengths.size(); ++i) {
@@ -227,7 +233,11 @@ std::vector<std::vector<std::int64_t>> pack_worst_fit(
                 length_to_indices[lengths[i]].push_back(static_cast<std::int64_t>(i));
             }
 
-            return std::make_tuple(counts, length_to_indices);
+            return std::make_tuple(
+                std::map<std::int64_t, std::int64_t>(counts.begin(), counts.end()),
+                std::map<std::int64_t, std::vector<std::int64_t>>(
+                    std::make_move_iterator(length_to_indices.begin()),
+                    std::make_move_iterator(length_to_indices.end())));
         }
 
 
@@ -454,14 +464,15 @@ Args:
 Returns:
     tuple[dict[int, int], dict[int, list[int]]]: ``(counts,
     length_to_indices)``: how many sequences have each length, and their
-    indices in ascending order. Key order is unspecified.
+    indices in ascending order. Both dicts list lengths in ascending order
+    on every platform.
 
 Example:
     >>> counts, pools = group_by_size([3, 5, 3, 9], max_length=8)
-    >>> sorted(counts.items())  # 9 was clipped to 8
-    [(3, 2), (5, 1), (8, 1)]
-    >>> pools[3]
-    [0, 2]
+    >>> counts  # 9 was clipped to 8
+    {3: 2, 5: 1, 8: 1}
+    >>> pools
+    {3: [0, 2], 5: [1], 8: [3]}
 )doc");
 
     m.def("pack_histogram", &pack_histogram,

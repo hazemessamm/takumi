@@ -104,14 +104,15 @@ def group_by_size(
     Returns:
         tuple[dict[int, int], dict[int, list[int]]]: ``(counts,
         length_to_indices)``: how many sequences have each length, and their
-        indices in ascending order. Key order is unspecified.
+        indices in ascending order. Both dicts list lengths in ascending order
+        on every platform.
 
     Example:
         >>> counts, pools = group_by_size([3, 5, 3, 9], max_length=8)
-        >>> sorted(counts.items())  # 9 was clipped to 8
-        [(3, 2), (5, 1), (8, 1)]
-        >>> pools[3]
-        [0, 2]
+        >>> counts  # 9 was clipped to 8
+        {3: 2, 5: 1, 8: 1}
+        >>> pools
+        {3: [0, 2], 5: [1], 8: [3]}
     """
     ...
 

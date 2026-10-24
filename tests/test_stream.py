@@ -60,6 +60,51 @@ def test_same_seed_is_reproducible():
     assert a == b
 
 
+def test_epoch_ignores_dict_and_index_order():
+    # Same contents, different listing order: C++ hash maps hand back keys in
+    # an order that differs across standard libraries, and callers may build
+    # pools by hand, so the epoch must depend on contents alone.
+    lengths = [5, 3, 5, 2, 3, 5, 2, 3, 4, 1, 3, 2]
+    layouts, pools = make_blueprint(lengths, max_seq_len=8)
+    rng = random.Random(0)
+    for _ in range(5):
+        shuffled_layouts = dict(rng.sample(list(layouts.items()), len(layouts)))
+        shuffled_pools = {
+            length: rng.sample(members, len(members))
+            for length, members in rng.sample(list(pools.items()), len(pools))
+        }
+        for seed in (0, 7):
+            for interleave in (False, True):
+                assert list(
+                    stream_packed_bins(shuffled_layouts, shuffled_pools,
+                                       seed=seed, interleave=interleave)
+                ) == list(
+                    stream_packed_bins(layouts, pools, seed=seed,
+                                       interleave=interleave)
+                )
+
+
+def test_group_by_size_returns_ascending_keys():
+    counts, pools = group_by_size([3, 5, 3, 8, 3, 5, 3, 1])
+    assert list(counts) == [1, 3, 5, 8]
+    assert list(pools) == [1, 3, 5, 8]
+
+
+def test_golden_epoch():
+    # Pins one epoch end to end (group_by_size -> pack_histogram -> stream).
+    # CI runs this on Linux, macOS and Windows, so passing everywhere is what
+    # backs "same seed, same epoch on every platform". A failure after a NumPy
+    # upgrade means its Generator changed the shuffle (NEP 19 allows that).
+    lengths = [5, 3, 5, 2, 3, 5, 2, 3, 4, 1]
+    layouts, pools = make_blueprint(lengths, max_seq_len=8)
+    assert list(stream_packed_bins(layouts, pools, seed=0)) == [
+        [3, 9], [5, 7], [2, 1], [0, 6], [8, 4],
+    ]
+    assert list(stream_packed_bins(layouts, pools, seed=0, interleave=True)) == [
+        [5, 7], [8, 1], [2, 3], [6, 9], [0, 4],
+    ]
+
+
 def test_seed_changes_the_stream():
     # Many identical-length sequences -> lots of shuffle freedom, so distinct
     # seeds must yield distinct emissions with overwhelming probability.
