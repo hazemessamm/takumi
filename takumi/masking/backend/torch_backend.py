@@ -175,4 +175,54 @@ def token_probs(
     return torch.where(tokens < vocab, picked.squeeze(-1), 0.0)
 
 
+def loss_sums(
+    token_loss: torch.Tensor,
+    labels: torch.Tensor,
+    weights: torch.Tensor,
+    attention_mask: typing.Optional[torch.Tensor] = None,
+) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+    """Weighted loss and token count for `elbo_loss`, on the loss's device.
+
+    ``labels``, ``weights`` and ``attention_mask`` are moved to the loss's
+    device and everything is summed in float32, so CPU-side corruption
+    outputs and a bfloat16 loss work as they come.
+
+    Args:
+        token_loss (torch.Tensor | np.ndarray of float, shape (B, L)): Loss
+            at each position.
+        labels (torch.Tensor | np.ndarray of int, shape (B, L)): ``-100``
+            where a position takes no loss.
+        weights (torch.Tensor | np.ndarray of float, shape (B,)): Each row's
+            loss weight.
+        attention_mask (torch.Tensor | np.ndarray, shape (B, L) | None):
+            Nonzero at real tokens; positions outside it take no loss and
+            are not counted. None counts every position.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Two scalars: the rows' weighted
+        sums of their labelled positions' loss, added up; the number of real
+        tokens.
+
+    Example:
+        >>> import torch
+        >>> loss = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        >>> labels = torch.tensor([[5, -100], [5, 5]])
+        >>> sums = loss_sums(loss, labels, torch.tensor([2.0, 1.0]))
+        >>> [s.item() for s in sums]  # 2 * 1 + 1 * (3 + 4), 4 tokens
+        [9.0, 4]
+    """
+    loss = to_tensor(token_loss).float()
+    device = loss.device
+    selected = to_tensor(labels).to(device) != -100
+    if attention_mask is None:
+        tokens = torch.tensor(loss.numel(), device=device)
+    else:
+        real = to_tensor(attention_mask).to(device).bool()
+        selected = selected & real
+        tokens = real.sum()
+    rows = torch.where(selected, loss, 0.0).sum(-1)
+    weights = to_tensor(weights).to(device=device, dtype=torch.float32)
+    return (rows * weights).sum(), tokens
+
+
 ArrayLike = typing.Union[np.ndarray, torch.Tensor]

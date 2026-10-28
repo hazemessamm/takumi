@@ -71,6 +71,9 @@ from takumi.masking.presets import MaskGITMasker
 # Inference-side decoding
 from takumi.masking.decoding import MaskGITDecoder
 
+# Training loss from per-token losses and ELBO weights
+from takumi.masking.loss import elbo_loss
+
 # Curriculum sampling + schedulers that feed SampledRate
 from takumi.masking.sampler import MLMProbabilitySampler
 from takumi.masking.scheduler import EMAScheduler
@@ -87,6 +90,7 @@ from takumi.masking import schemes
 from takumi.masking import presets
 from takumi.masking import corruptor
 from takumi.masking import decoding
+from takumi.masking import loss
 from takumi.masking import sampler
 from takumi.masking import scheduler
 from takumi.masking import schedules
@@ -128,6 +132,7 @@ __all__ = [
     "HybridSpanMasker",
     "MaskGITMasker",
     "MaskGITDecoder",
+    "elbo_loss",
     "MLMProbabilitySampler",
     "EMAScheduler",
     "LinearScheduler",

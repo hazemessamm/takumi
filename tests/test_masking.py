@@ -41,6 +41,7 @@ from takumi.masking import CallContext
 from takumi.masking import CosineSchedule
 from takumi.masking import Corruptor
 from takumi.masking import DiffusionMasker
+from takumi.masking import elbo_loss
 from takumi.masking import EMAScheduler
 from takumi.masking import ExactCount
 from takumi.masking import FixedMasker
@@ -991,3 +992,152 @@ def test_eps_is_validated_and_defaults_to_no_floor():
 
     assert OwnInit(2)(0.5, 1.0) == 0.25
     assert resolve_schedule(lambda step, total: step / total)(0.5, 1.0) == 0.5
+
+
+# --------------------------------------------------------------------------
+# elbo_loss
+# --------------------------------------------------------------------------
+
+def _diffusion_result(rows=8, length=32, padding=0):
+    masker = DiffusionMasker(100, MASK, SPECIALS, time="discrete")
+    tokens = _batch(rows, length)
+    tokens[:, length - padding:] = 0  # special id: never masked, like padding
+    steps = np.arange(1, rows + 1) * (100 // rows)  # spread over 1..T
+    return masker(tokens, seed=0, timestep=steps)
+
+
+def _token_loss(shape):
+    return np.random.default_rng(1).random(shape)
+
+
+def _value(loss):
+    return float(backend.to_numpy(loss))
+
+
+def _weighted_sum(ce, result):
+    selected = backend.to_numpy(result.labels) != -100
+    rows = np.where(selected, ce, 0.0).sum(axis=1)
+    return (backend.to_numpy(result.weights) * rows).sum()
+
+
+def _elbo(ce, result, **kwargs):
+    # The (B*L,) layout elbo_loss takes, from (B, L) arrays.
+    return elbo_loss(ce.reshape(-1), result.labels.reshape(-1), result.weights,
+                     **kwargs)
+
+
+def test_elbo_loss_is_the_nelbo_per_token():
+    result = _diffusion_result()
+    ce = _token_loss(result.labels.shape)
+    expected = _weighted_sum(ce, result) / ce.size
+    assert _value(_elbo(ce, result)) == pytest.approx(expected, rel=1e-6)
+
+
+def test_elbo_loss_attention_mask_leaves_padding_out_of_the_count():
+    result = _diffusion_result(padding=8)
+    ce = _token_loss(result.labels.shape)
+    attention_mask = np.ones(ce.shape, dtype=bool)
+    attention_mask[:, -8:] = False
+    loss = _elbo(ce, result, attention_mask=attention_mask.reshape(-1))
+    expected = _weighted_sum(ce, result) / attention_mask.sum()
+    assert _value(loss) == pytest.approx(expected, rel=1e-6)
+
+
+def test_elbo_loss_ignores_unlabelled_positions():
+    result = _diffusion_result()
+    ce = _token_loss(result.labels.shape)
+    garbage = np.where(backend.to_numpy(result.labels) != -100, ce, np.nan)
+    assert _value(_elbo(garbage, result)) == _value(_elbo(ce, result))
+
+
+def test_elbo_loss_is_zero_when_nothing_is_masked():
+    loss = elbo_loss(np.ones(32), np.full(32, -100), np.ones(4))
+    assert _value(loss) == 0.0
+
+
+def test_elbo_loss_is_zero_when_the_mask_leaves_no_tokens():
+    # The labelled position is masked out too, so nothing is summed.
+    loss = elbo_loss(np.ones(4), np.array([5, -100, -100, -100]), np.ones(1),
+                     attention_mask=np.zeros(4))
+    assert _value(loss) == 0.0
+
+
+def test_elbo_loss_takes_no_loss_outside_the_attention_mask():
+    labels = np.array([5, 6, -100, 7])  # B = 1; the last position is padding
+    mask = np.array([1, 1, 1, 0])
+    loss = elbo_loss(np.full(4, 2.0), labels, np.ones(1), attention_mask=mask)
+    assert _value(loss) == pytest.approx(4.0 / 3)  # (2 + 2) / 3 real tokens
+
+
+@pytest.mark.parametrize("shape", [(), (8, 32), (256, 5)])
+def test_elbo_loss_rejects_a_loss_that_is_not_flat(shape):
+    result = _diffusion_result()
+    with pytest.raises(ValueError, match="flattened per-token loss"):
+        elbo_loss(np.ones(shape), result.labels.reshape(-1), result.weights)
+
+
+def test_elbo_loss_rejects_one_loss_per_row():
+    result = _diffusion_result()
+    with pytest.raises(ValueError, match="reduction='none'"):
+        elbo_loss(np.ones(8), result.labels.reshape(-1), result.weights)
+
+
+def test_elbo_loss_rejects_labels_that_are_not_flat():
+    result = _diffusion_result()
+    with pytest.raises(ValueError, match="labels must be flattened"):
+        elbo_loss(np.ones(256), result.labels, result.weights)
+
+
+@pytest.mark.parametrize(
+    "shape, message",
+    [((8, 1), "one value per row"), ((7,), "split evenly"), ((0,), "split evenly")],
+)
+def test_elbo_loss_rejects_weights_that_do_not_give_the_rows(shape, message):
+    result = _diffusion_result()
+    with pytest.raises(ValueError, match=message):
+        elbo_loss(np.ones(256), result.labels.reshape(-1), np.ones(shape))
+
+
+def test_elbo_loss_rejects_an_attention_mask_that_is_not_flat():
+    result = _diffusion_result()
+    with pytest.raises(ValueError, match="attention_mask must be flattened"):
+        elbo_loss(np.ones(256), result.labels.reshape(-1), result.weights,
+                  attention_mask=np.ones((8, 32)))
+
+
+@pytest.mark.skipif(
+    ACTIVE_BACKEND != "torch",
+    reason=f"needs the torch backend; TAKUMI_MASKING_BACKEND selected "
+    f"{ACTIVE_BACKEND!r}",
+)
+def test_elbo_loss_torch_sums_in_float32_and_backpropagates():
+    torch = pytest.importorskip("torch")
+    result = _diffusion_result()  # NumPy labels and weights
+    ce = torch.as_tensor(_token_loss(256), dtype=torch.bfloat16)
+    ce.requires_grad_(True)
+    loss = elbo_loss(ce, result.labels.reshape(-1), result.weights)
+    assert loss.dtype == torch.float32 and loss.ndim == 0
+    loss.backward()
+    selected = torch.as_tensor(result.labels.reshape(-1) != -100)
+    assert torch.all(ce.grad[~selected] == 0)
+    assert torch.all(ce.grad[selected] > 0)
+
+
+@pytest.mark.skipif(
+    ACTIVE_BACKEND != "jax",
+    reason=f"needs the jax backend; TAKUMI_MASKING_BACKEND selected "
+    f"{ACTIVE_BACKEND!r}",
+)
+def test_elbo_loss_jax_traces_under_jit_and_grad():
+    jax = pytest.importorskip("jax")
+    result = _diffusion_result()
+    labels = result.labels.reshape(-1)
+
+    def loss_fn(c):
+        return elbo_loss(c, labels, result.weights)
+
+    ce = jax.numpy.asarray(_token_loss(256), dtype=jax.numpy.float32)
+    assert np.allclose(np.asarray(loss_fn(ce)), np.asarray(jax.jit(loss_fn)(ce)))
+    grad = np.asarray(jax.grad(loss_fn)(ce))
+    assert np.all(grad[labels == -100] == 0)
+    assert np.all(grad[labels != -100] > 0)

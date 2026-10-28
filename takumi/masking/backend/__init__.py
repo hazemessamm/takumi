@@ -10,6 +10,8 @@ module bound to ``backend``. Both modules expose the same interface:
   of one token per position, for `MaskGITDecoder`.
 - ``token_probs(logits, tokens)`` — on-device probability of the tokens
   already in a sequence, for `MaskGITDecoder`'s confidence remasking.
+- ``loss_sums(token_loss, labels, weights, attention_mask)`` — the weighted
+  loss and token count `elbo_loss` divides, on the loss's device.
 - ``ArrayLike`` — the union of NumPy arrays and the framework's arrays.
 
 Example:

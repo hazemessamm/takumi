@@ -152,18 +152,37 @@ objective, an upper bound on the negative log-likelihood. `ScheduleRate` (so
 `DiffusionMasker`) takes a required `time`: `"discrete"` for whole-number
 steps drawn from 1..T, which gets the exact discrete-time weight, or
 `"continuous"` for real-valued steps, which gets `p′(t)/p(t)`.
-`UniformTimestepRate` draws real `t`, so it always uses `p′(t)/p(t)`. Rates without time give weights of 1, i.e. plain MLM loss.
+`UniformTimestepRate` draws real `t`, so it always uses `p′(t)/p(t)`. Rates without time give weights of 1.
+
+`elbo_loss` turns the per-token cross-entropy into the diffusion training
+loss: it sums each row's loss over the masked positions, multiplies by the
+row's weight, and divides by the number of real tokens, giving the NELBO per
+token. Pass `attention_mask=` on padded batches: padding is `-100` in the
+labels like any unmasked token, so only the mask keeps it out of the count.
+The labels and weights may come from a dict batch and stay on the CPU.
 
 ```python
 import torch.nn.functional as F
+from takumi.masking import elbo_loss
 
 steps = torch.randint(1, 1001, (8,))  # 1..T: step 0 masks nothing
 result = diffusion(x, seed=10, timestep=steps)
 logits = model(result.sequences)                       # (B, L, V)
-ce = F.cross_entropy(logits.transpose(1, 2), result.labels,
-                     ignore_index=-100, reduction="none")  # (B, L)
-loss = (result.weights * ce.sum(1)).sum() / x.numel()  # NELBO per token
+labels = result.labels.view(-1)                        # (B*L,)
+ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels,
+                     ignore_index=-100, reduction="none")  # (B*L,): per token
+loss = elbo_loss(ce, labels, result.weights)
 ```
+
+`elbo_loss` takes the loss, labels and `attention_mask` flattened to `(B*L,)`,
+as above, and splits them back into rows by the `(B,)` weights. Reduce the
+cross-entropy with `reduction="none"`: averaging first and weighting after
+gives a different objective, so `elbo_loss` rejects anything but one loss per
+position.
+
+The MLM maskers (weights of 1) don't need `elbo_loss`: their loss is the mean
+over the selected tokens, `F.cross_entropy(..., ignore_index=-100)`. Dividing
+by every token, as `elbo_loss` does, would scale it by the masking fraction.
 
 The weights are exact for independent per-token masking (`DiffusionMasker`
 without `focus`); with exact-count masking (`MaskGITMasker`) they are an
