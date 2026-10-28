@@ -115,6 +115,36 @@ class SharedCounter:
         with self._value.get_lock():
             self._value.value = self.initial_value
 
+    def set(self, value: int):
+        """Set the value under the lock, for example when resuming a run.
+
+        Every process sharing the counter sees the new value, just as it sees
+        ``step``.
+
+        Args:
+            value (int): New value, in ``[initial_value, final_value]``.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If ``value`` is outside the counter's range.
+
+        Example:
+            >>> counter = SharedCounter(0, 10)
+            >>> counter.set(7)
+            >>> counter.get()
+            7
+        """
+        value = int(value)
+        if not (self.initial_value <= value <= self.final_value):
+            raise ValueError(
+                f"value must be in [{self.initial_value}, "
+                f"{self.final_value}], got {value}"
+            )
+        with self._value.get_lock():
+            self._value.value = value
+
     def __repr__(self):
         """Show the current value and both bounds.
 

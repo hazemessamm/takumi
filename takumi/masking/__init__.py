@@ -38,6 +38,7 @@ from takumi.masking.context import CallContext
 from takumi.masking.corruptor import Corruptor
 from takumi.masking.corruptor import MaskingResult
 from takumi.masking.rates import RatePolicy
+from takumi.masking.rates import RateDraw
 from takumi.masking.rates import FixedRate
 from takumi.masking.rates import BetaRate
 from takumi.masking.rates import SampledRate
@@ -99,6 +100,7 @@ __all__ = [
     "Corruptor",
     "MaskingResult",
     "RatePolicy",
+    "RateDraw",
     "FixedRate",
     "BetaRate",
     "SampledRate",

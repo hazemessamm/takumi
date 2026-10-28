@@ -8,6 +8,7 @@ training and decoding — independent of any particular tokenizer.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import types
@@ -37,21 +38,32 @@ from takumi.masking import BetaMasker
 from takumi.masking import BetaRate
 from takumi.masking import Bernoulli
 from takumi.masking import CallContext
+from takumi.masking import CosineSchedule
 from takumi.masking import Corruptor
 from takumi.masking import DiffusionMasker
+from takumi.masking import EMAScheduler
 from takumi.masking import ExactCount
 from takumi.masking import FixedMasker
 from takumi.masking import FixedRate
 from takumi.masking import FocusBiased
 from takumi.masking import HybridSpanMasker
+from takumi.masking import LinearSchedule
+from takumi.masking import LinearScheduler
 from takumi.masking import MaskGITDecoder
 from takumi.masking import MaskGITMasker
 from takumi.masking import MaskOnly
+from takumi.masking import MaskSchedule
 from takumi.masking import Mixed
+from takumi.masking import MLMProbabilitySampler
 from takumi.masking import ScheduleRate
 from takumi.masking import Spans
+from takumi.masking import SqrtSchedule
+from takumi.masking import StagedLinearScheduler
 from takumi.masking import UniformTimestepRate
 from takumi.masking import focus_from_reference
+from takumi.masking.rates import RateDraw
+from takumi.masking.rates import RatePolicy
+from takumi.masking.schedules import resolve_schedule
 
 VOCAB = list(range(10, 60))
 SPECIALS = [0]
@@ -108,9 +120,10 @@ def test_labels_are_original_at_selected_and_ignore_elsewhere():
 def test_result_is_positional_and_named():
     m = FixedMasker(0.5, 0.8, 0.1, MASK, VOCAB, SPECIALS)
     res = m(_batch(), seed=1)
-    seqs, labels, masked, mutated, kept = res  # positional 5-tuple unpack
+    seqs, labels, masked, mutated, kept, timesteps, weights = res
     assert seqs is res.sequences and labels is res.labels
     assert masked is res.masked and mutated is res.mutated and kept is res.kept
+    assert timesteps is res.timesteps and weights is res.weights
 
 
 @pytest.mark.skipif(
@@ -124,7 +137,7 @@ def test_torch_roundtrip_matches_numpy():
     seq = _batch()
     n = m(seq, seed=99)
     t = m(torch.as_tensor(seq), seed=99)
-    for field in ("sequences", "labels", "masked", "mutated", "kept"):
+    for field in ("sequences", "labels", "masked", "mutated", "kept", "weights"):
         assert isinstance(getattr(t, field), torch.Tensor)
         assert np.array_equal(getattr(t, field).numpy(), getattr(n, field))
     assert t.masked.dtype == torch.bool
@@ -204,25 +217,26 @@ def test_mixed_80_10_10_distribution():
 def test_beta_rate_mean():
     policy = BetaRate(0.3, 50.0)
     rng = np.random.default_rng(0)
-    draws = [policy(CallContext(rng=rng)) for _ in range(5000)]
+    draws = [policy(CallContext(rng=rng)).rate for _ in range(5000)]
     assert abs(np.mean(draws) - 0.3) < 0.02
 
 
 def test_schedule_rate_endpoints():
-    policy = ScheduleRate(10, "cosine")
+    policy = ScheduleRate(10, "cosine", time="discrete")
     assert policy.rate_at(0) == pytest.approx(0.0)
     assert policy.rate_at(10) == pytest.approx(1.0)
 
 
 def test_schedule_rate_requires_timestep():
-    corr = Corruptor(ScheduleRate(10), Bernoulli(), MaskOnly(MASK), SPECIALS)
+    corr = Corruptor(ScheduleRate(10, time="discrete"), Bernoulli(), MaskOnly(MASK),
+                     SPECIALS)
     with pytest.raises(ValueError):
         corr(_batch(), seed=1)  # no timestep
 
 
 def test_diffusion_endpoints():
     m = DiffusionMasker(total_timesteps=10, mask_token_id=MASK,
-                        special_token_ids=SPECIALS)
+                        special_token_ids=SPECIALS, time="discrete")
     seq = _batch()
     lab0 = m(seq, seed=1, timestep=0).labels
     lab_t = m(seq, seed=1, timestep=10).labels
@@ -234,21 +248,23 @@ def test_cosine_schedule_matches_maskgit():
     # MaskGIT's gamma(r) = cos(r * pi / 2) at progress r = 1 - t / T. The
     # endpoints alone cannot tell it from its mirror image 1 - cos(t*pi/2T),
     # so check the midpoint and the mean too.
-    policy = ScheduleRate(100, "cosine")
+    policy = ScheduleRate(100, "cosine", time="continuous")
     assert policy.rate_at(50) == pytest.approx(math.sqrt(0.5))
     mean = np.mean([policy.rate_at(t) for t in np.linspace(0, 100, 10001)])
     assert mean == pytest.approx(2 / math.pi, abs=1e-3)
 
 
 def test_schedule_rate_per_row_timesteps():
-    corr = Corruptor(ScheduleRate(10), Bernoulli(), MaskOnly(MASK), SPECIALS)
+    corr = Corruptor(ScheduleRate(10, time="discrete"), Bernoulli(), MaskOnly(MASK),
+                     SPECIALS)
     labels = corr(_batch(rows=2), seed=1, timestep=np.array([0, 10])).labels
     assert np.all(labels[0] == -100)
     assert np.all(labels[1] != -100)
 
 
 def test_per_row_rate_must_match_batch():
-    corr = Corruptor(ScheduleRate(10), Bernoulli(), MaskOnly(MASK), SPECIALS)
+    corr = Corruptor(ScheduleRate(10, time="discrete"), Bernoulli(), MaskOnly(MASK),
+                     SPECIALS)
     with pytest.raises(ValueError):
         corr(_batch(rows=2), seed=1, timestep=np.array([0, 5, 10]))
 
@@ -256,7 +272,7 @@ def test_per_row_rate_must_match_batch():
 def test_uniform_timestep_rate_draws_per_row():
     policy = UniformTimestepRate("cosine")
     ctx = CallContext(rng=np.random.default_rng(0), batch_size=20000)
-    rates = policy(ctx)
+    rates = policy(ctx).rate
     assert rates.shape == (20000,)
     assert np.all((rates > 0.0) & (rates <= 1.0))
     assert abs(rates.mean() - 2 / math.pi) < 0.01
@@ -670,3 +686,258 @@ def test_focus_from_reference_marks_differences():
 def test_focus_from_reference_shape_mismatch_raises():
     with pytest.raises(ValueError):
         focus_from_reference(np.zeros((2, 4)), np.zeros((2, 5)))
+
+
+# --------------------------------------------------------------------------
+# resuming the curriculum
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: LinearScheduler([1.0, 0.0, 0.5], [0.0, 1.0, 0.5], total_steps=50),
+        lambda: EMAScheduler([1.0, 0.0, 0.5], [0.0, 1.0, 0.5], beta=0.9),
+        lambda: StagedLinearScheduler(num_stages=3, total_steps=30),
+    ],
+    ids=["linear", "ema", "staged"],
+)
+def test_scheduler_resumes_from_state_dict(make):
+    original = make()
+    for _ in range(17):
+        original.step()
+    # through JSON, as a checkpoint file would store it
+    state = json.loads(json.dumps(original.state_dict()))
+    resumed = make()
+    assert resumed.sample() != original.sample()
+    resumed.load_state_dict(state)
+    assert resumed.sample() == original.sample()
+    for _ in range(5):
+        original.step()
+        resumed.step()
+    assert resumed.sample() == original.sample()
+
+
+def test_scheduler_rejects_out_of_range_step():
+    scheduler = LinearScheduler([1.0], [0.0], total_steps=10)
+    for step in (-1, 11):
+        with pytest.raises(ValueError):
+            scheduler.load_state_dict({"step": step})
+
+
+def test_sampler_resumes_its_scheduler():
+    def make():
+        scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=10)
+        return MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1],
+                                     scheduler)
+
+    def draws(sampler):
+        return [sampler.sample(rng=i) for i in range(50)]
+
+    original = make()
+    for _ in range(6):
+        original.step()
+    resumed = make()
+    assert draws(resumed) != draws(original)
+    resumed.load_state_dict(original.state_dict())
+    assert draws(resumed) == draws(original)
+
+
+def test_sampler_state_must_match_scheduler_presence():
+    plain = MLMProbabilitySampler([0.1], [0.8], [0.1])
+    assert plain.state_dict() == {}
+    plain.load_state_dict({})
+    with pytest.raises(ValueError):
+        plain.load_state_dict({"scheduler": {"step": 1}})
+    scheduled = MLMProbabilitySampler(
+        [0.1], [0.8], [0.1], LinearScheduler([1.0], [1.0], total_steps=2)
+    )
+    with pytest.raises(ValueError):
+        scheduled.load_state_dict({})
+
+
+# --------------------------------------------------------------------------
+# ELBO loss weights
+# --------------------------------------------------------------------------
+
+BUILTIN_SCHEDULES = [LinearSchedule(), CosineSchedule(), SqrtSchedule()]
+SCHEDULE_IDS = ["linear", "cosine", "sqrt"]
+
+
+@pytest.mark.parametrize("schedule", BUILTIN_SCHEDULES, ids=SCHEDULE_IDS)
+def test_closed_form_slope_matches_the_derivative(schedule):
+    # MaskSchedule.compute_slope differentiates rate numerically; each
+    # built-in closed form must agree with it.
+    for step in (0.5, 1, 10, 37.5, 50, 90, 99.9):
+        numeric = MaskSchedule.compute_slope(schedule, step, 100)
+        assert schedule.compute_slope(step, 100) == pytest.approx(numeric, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    "schedule, weight",
+    [
+        (LinearSchedule(), lambda t: 1 / t),
+        (CosineSchedule(), lambda t: math.pi / 2 * math.tan((1 - t) * math.pi / 2)),
+        (SqrtSchedule(), lambda t: 1 / (2 * t)),
+    ],
+    ids=SCHEDULE_IDS,
+)
+def test_continuous_elbo_weight_closed_forms(schedule, weight):
+    for t in (0.01, 0.25, 0.5, 0.75, 0.99):
+        assert schedule.continuous_elbo_weight(t, 1.0) == pytest.approx(weight(t))
+    assert schedule.continuous_elbo_weight(0, 1.0) == 0.0  # clean data
+
+
+def test_custom_schedule_gets_a_numerical_slope_and_weight():
+    cubic = resolve_schedule(lambda step, total: (step / total) ** 3)
+    for t in (0.1, 0.5, 0.9):
+        assert cubic.compute_slope(t, 1.0) == pytest.approx(3 * t**2, rel=1e-6)
+        assert cubic.continuous_elbo_weight(t, 1.0) == pytest.approx(3 / t, rel=1e-6)
+
+
+@pytest.mark.parametrize("schedule", BUILTIN_SCHEDULES, ids=SCHEDULE_IDS)
+def test_discrete_weights_count_each_token_once(schedule):
+    # Steps uniform on 1..T: E[w_i * L * p(i)] = L * sum(p(i) - p(i-1)) = L,
+    # so every token's prediction is charged once, as in an AR model.
+    T, length = 100, 64
+    expected_count = sum(
+        schedule.discrete_elbo_weight(i, T) * length * schedule.rate(i, T)
+        for i in range(1, T + 1)
+    ) / T
+    assert expected_count == pytest.approx(length, rel=1e-9)
+
+
+def test_discrete_elbo_weight_values_and_errors():
+    linear = LinearSchedule()
+    assert linear.discrete_elbo_weight(0, 100) == 0.0  # clean data
+    for i in (1, 7, 50, 100):
+        assert linear.discrete_elbo_weight(i, 100) == pytest.approx(100 / i)
+    shrinking = resolve_schedule(lambda step, total: 0.5 if step < 2 else 0.25)
+    with pytest.raises(ValueError):
+        shrinking.discrete_elbo_weight(2, 10)
+
+
+def test_schedule_rate_weights_follow_the_time_argument():
+    ctx = CallContext(rng=np.random.default_rng(0), batch_size=3,
+                      timestep=np.array([1, 50, 100]))
+    discrete = ScheduleRate(100, "cosine", time="discrete")
+    draw = discrete(ctx)
+    assert draw.timesteps.tolist() == [1, 50, 100]
+    expected = [discrete.schedule.discrete_elbo_weight(t, 100) for t in (1, 50, 100)]
+    assert draw.weights.tolist() == pytest.approx(expected)
+
+    # the same whole-number steps, declared continuous, get p'(t) / p(t)
+    continuous = ScheduleRate(100, "cosine", time="continuous")
+    expected = [continuous.schedule.continuous_elbo_weight(t, 100) for t in (1, 50, 100)]
+    assert continuous(ctx).weights.tolist() == pytest.approx(expected)
+
+    ctx.timestep = 50  # a scalar applies to every row
+    expected = [discrete.schedule.discrete_elbo_weight(50, 100)] * 3
+    assert discrete(ctx).weights.tolist() == pytest.approx(expected)
+
+
+def test_discrete_time_rejects_fractional_timesteps():
+    ctx = CallContext(rng=np.random.default_rng(0), batch_size=2,
+                      timestep=np.array([10, 50.5]))
+    with pytest.raises(ValueError):
+        ScheduleRate(100, time="discrete")(ctx)
+    ScheduleRate(100, time="continuous")(ctx)  # fine when declared continuous
+
+
+def test_time_argument_is_required_and_checked():
+    with pytest.raises(TypeError):
+        ScheduleRate(100)
+    with pytest.raises(ValueError):
+        ScheduleRate(100, time="integer")
+    with pytest.raises(TypeError):
+        DiffusionMasker(100, MASK, SPECIALS)
+
+
+def test_uniform_timestep_rate_reports_its_draw():
+    policy = UniformTimestepRate("cosine")
+    draw = policy(CallContext(rng=np.random.default_rng(0), batch_size=5))
+    for t, rate, weight in zip(draw.timesteps, draw.rate, draw.weights):
+        assert rate == pytest.approx(policy.schedule.rate(t, 1.0))
+        assert weight == pytest.approx(policy.schedule.continuous_elbo_weight(t, 1.0))
+
+
+def test_masking_result_carries_timesteps_and_weights():
+    seq = _batch(rows=3)
+    plain = FixedMasker(0.5, 0.8, 0.1, MASK, VOCAB, SPECIALS)(seq, seed=0)
+    assert plain.timesteps is None
+    assert plain.weights.tolist() == [1.0, 1.0, 1.0]
+
+    steps = np.array([10, 50, 90])
+    diffusion = DiffusionMasker(100, MASK, SPECIALS, time="discrete")(
+        seq, seed=0, timestep=steps)
+    assert diffusion.timesteps.tolist() == [10, 50, 90]
+    assert diffusion.weights.dtype == np.float32
+    expected = [CosineSchedule().discrete_elbo_weight(t, 100) for t in steps]
+    assert diffusion.weights.tolist() == pytest.approx(expected, rel=1e-6)
+
+    maskgit = MaskGITMasker(MASK, SPECIALS)(seq, seed=0)
+    assert maskgit.timesteps.shape == (3,) and maskgit.weights.shape == (3,)
+
+
+def test_corruptor_rejects_weights_of_the_wrong_shape():
+    class BadWeights(RatePolicy):
+        def draw(self, ctx):
+            return RateDraw(0.5, None, np.ones(ctx.batch_size + 1))
+
+    corr = Corruptor(BadWeights(), Bernoulli(), MaskOnly(MASK), SPECIALS)
+    with pytest.raises(ValueError):
+        corr(_batch(rows=2), seed=0)
+
+
+@pytest.mark.parametrize(
+    "make", [LinearSchedule, CosineSchedule, SqrtSchedule], ids=SCHEDULE_IDS
+)
+def test_floor_reaches_masking_and_both_weights(make):
+    eps = 0.1
+    raw, floored = make(), make(eps=eps)
+
+    def p(step, total):
+        return eps + (1 - eps) * raw.rate(step, total)
+
+    for t in (0.01, 0.3, 0.9):
+        assert floored(t, 1.0) == pytest.approx(p(t, 1.0))
+        expected = (1 - eps) * raw.compute_slope(t, 1.0) / p(t, 1.0)
+        assert floored.continuous_elbo_weight(t, 1.0) == pytest.approx(expected)
+    for i in (1, 50, 100):
+        expected = 100 * (p(i, 100) - p(i - 1, 100)) / p(i, 100)
+        assert floored.discrete_elbo_weight(i, 100) == pytest.approx(expected)
+
+    # the rate policies mask with the floored curve, never below eps
+    draw = UniformTimestepRate(floored)(
+        CallContext(rng=np.random.default_rng(0), batch_size=1000)
+    )
+    assert draw.rate.min() >= eps
+    assert np.allclose(draw.rate, [p(t, 1.0) for t in draw.timesteps])
+    ctx = CallContext(rng=np.random.default_rng(0), batch_size=2,
+                      timestep=np.array([0, 50]))
+    rate = ScheduleRate(100, floored, time="discrete")(ctx).rate
+    assert rate.tolist() == pytest.approx([eps, p(50, 100)])
+
+    # the price of the floor: p(0) = eps, so each token is charged (1 - eps)
+    # times on average instead of once (the t = 0 boundary term is dropped)
+    T, length = 100, 64
+    expected_count = sum(
+        floored.discrete_elbo_weight(i, T) * length * floored(i, T)
+        for i in range(1, T + 1)
+    ) / T
+    assert expected_count == pytest.approx((1 - eps) * length)
+
+
+def test_eps_is_validated_and_defaults_to_no_floor():
+    for eps in (-0.1, 1.0):
+        with pytest.raises(ValueError):
+            LinearSchedule(eps=eps)
+
+    class OwnInit(MaskSchedule):  # skips super().__init__()
+        def __init__(self, power):
+            self.power = power
+
+        def rate(self, step, total):
+            return (step / total) ** self.power
+
+    assert OwnInit(2)(0.5, 1.0) == 0.25
+    assert resolve_schedule(lambda step, total: step / total)(0.5, 1.0) == 0.5

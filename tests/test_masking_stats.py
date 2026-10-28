@@ -42,6 +42,7 @@ from takumi.masking import backend
 from takumi.masking import BetaRate
 from takumi.masking import Bernoulli
 from takumi.masking import CallContext
+from takumi.masking import Corruptor
 from takumi.masking import DiffusionMasker
 from takumi.masking import ExactCount
 from takumi.masking import FocusBiased
@@ -50,6 +51,7 @@ from takumi.masking import MaskGITDecoder
 from takumi.masking import MaskGITMasker
 from takumi.masking import Mixed
 from takumi.masking import MLMProbabilitySampler
+from takumi.masking import SampledRate
 from takumi.masking import Spans
 from takumi.masking import UniformTimestepRate
 
@@ -112,7 +114,7 @@ def test_beta_rate_mean_and_variance():
     mean, concentration = 0.3, 10.0
     policy = BetaRate(mean, concentration)
     rng = np.random.default_rng(0)
-    draws = np.array([policy(CallContext(rng=rng)) for _ in range(20000)])
+    draws = np.array([policy(CallContext(rng=rng)).rate for _ in range(20000)])
     variance = mean * (1.0 - mean) / (concentration + 1.0)
     assert_mean(draws, mean, variance)
     assert_variance_ratio(draws.var(), variance, draws.size)
@@ -132,14 +134,14 @@ def test_beta_rate_mean_and_variance():
 )
 def test_uniform_timestep_rate_follows_its_schedule(name, cdf):
     ctx = CallContext(rng=np.random.default_rng(0), batch_size=50000)
-    assert_cdf(UniformTimestepRate(name)(ctx), cdf)
+    assert_cdf(UniformTimestepRate(name)(ctx).rate, cdf)
 
 
 def test_diffusion_masker_masks_at_the_schedule_rate():
     total, rows, length = 1000, 200, 500
     steps = np.array([0, 100, 250, 500, 750, 1000])
     timesteps = np.repeat(steps, rows)
-    masker = DiffusionMasker(total, MASK, SPECIALS)
+    masker = DiffusionMasker(total, MASK, SPECIALS, time="discrete")
     tokens = np.full((timesteps.size, length), 25)
     masked = masker(tokens, seed=0, timestep=timesteps).masked
     for i, t in enumerate(steps):
@@ -256,6 +258,22 @@ def test_mixed_split_and_uniform_substitutes():
 # MaskGIT training and decoding
 # --------------------------------------------------------------------------
 
+@pytest.mark.parametrize("schedule", ["linear", "cosine", "sqrt"])
+def test_weighted_mask_count_averages_to_the_sequence_length(schedule):
+    # With steps uniform on 1..T and independent masking, the ELBO weights
+    # give E[weight * masked count] = L: each token is charged once. This
+    # checks scale and wiring end to end; it can't check the weight's shape
+    # (a naive 1/p passes too), which the closed-form tests cover. Integer
+    # steps cap the weights at T, so the variance is finite here.
+    total, rows, length = 100, 20000, 64
+    steps = np.random.default_rng(1).integers(1, total + 1, rows)
+    masker = DiffusionMasker(total, MASK, SPECIALS, schedule=schedule,
+                             time="discrete")
+    result = masker(np.full((rows, length), 25), seed=0, timestep=steps)
+    samples = result.weights.astype(np.float64) * result.masked.sum(axis=1)
+    assert_mean(samples, length, samples.var())
+
+
 def test_maskgit_masker_count_distribution():
     rows, n = 50000, 20
     masked = MaskGITMasker(MASK, SPECIALS)(np.full((rows, n), 25), seed=0).masked
@@ -319,12 +337,30 @@ def test_mlm_sampler_draws_in_proportion_to_weights():
     scheduler = LinearScheduler(weights, weights, total_steps=1)
     rates = [0.1, 0.2, 0.3]
     sampler = MLMProbabilitySampler(rates, [0.8] * 3, [0.1] * 3, scheduler)
-    picks = np.array([sampler.sample(seed=i)[0] for i in range(n)])
+    picks = np.array([sampler.sample(rng=i)[0] for i in range(n)])
     assert_proportion(int((picks == 0.1).sum()), n, 0.25)
     assert_proportion(int((picks == 0.2).sum()), n, 0.75)
     assert not np.any(picks == 0.3)
 
     uniform = MLMProbabilitySampler(rates, [0.8] * 3, [0.1] * 3)
-    picks = np.array([uniform.sample(seed=i)[0] for i in range(n)])
+    picks = np.array([uniform.sample(rng=i)[0] for i in range(n)])
     for rate in rates:
         assert_proportion(int((picks == rate).sum()), n, 1 / 3)
+
+
+def test_sampled_rate_pick_is_independent_of_selection():
+    # The pick and the selection share the call's generator. Re-seeding a
+    # second generator from the call's seed would reuse the pick's uniform
+    # for position 0, biasing it (P ~ 0.15 instead of 0.325 here).
+    n = 6000
+    weights = [0.5, 0.5]
+    scheduler = LinearScheduler(weights, weights, total_steps=1)
+    sampler = MLMProbabilitySampler([0.15, 0.5], [0.8] * 2, [0.1] * 2,
+                                    scheduler)
+    corruptor = Corruptor(SampledRate(sampler), Bernoulli(),
+                          Mixed(1.0, 0.0, MASK, VOCAB), SPECIALS)
+    hits = sum(
+        bool(corruptor(np.full((1, 4), 25), seed=i).masked[0, 0])
+        for i in range(n)
+    )
+    assert_proportion(hits, n, 0.5 * 0.15 + 0.5 * 0.5)

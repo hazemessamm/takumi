@@ -48,6 +48,10 @@ def _step_scheduler(scheduler: LinearScheduler, times: int) -> None:
         scheduler.step()
 
 
+def _load_scheduler_state(scheduler: LinearScheduler, step: int) -> None:
+    scheduler.load_state_dict({"step": step})
+
+
 def _run_children(method, target, arg, n_procs, times):
     """Start ``n_procs`` children, each calling ``target(arg, times)``."""
     ctx = mp.get_context(method)
@@ -118,6 +122,24 @@ def test_reset_from_parent_is_seen_by_later_children(method):
 
     _run_children(method, _step_scheduler, scheduler, n_procs=1, times=2)
     assert scheduler.current_step.get() == 2
+
+
+@pytest.mark.parametrize("method", START_METHODS)
+@pytest.mark.parametrize("n_procs", [1, 2])
+def test_children_continue_from_a_loaded_state(method, n_procs):
+    """Resuming in the parent before workers start: they pick up from there."""
+    scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=100)
+    scheduler.load_state_dict({"step": 40})
+    _run_children(method, _step_scheduler, scheduler, n_procs, times=3)
+    assert scheduler.state_dict() == {"step": 40 + 3 * n_procs}
+
+
+@pytest.mark.parametrize("method", START_METHODS)
+def test_state_loaded_in_a_child_reaches_the_parent(method):
+    """load_state_dict writes the shared value, exactly as step() does."""
+    scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=100)
+    _run_children(method, _load_scheduler_state, scheduler, n_procs=1, times=25)
+    assert scheduler.state_dict() == {"step": 25}
 
 
 def test_plain_pickle_is_refused():

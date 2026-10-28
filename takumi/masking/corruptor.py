@@ -19,8 +19,9 @@ class MaskingResult(typing.NamedTuple):
 
     ``masked``, ``mutated``, and ``kept`` are boolean masks that partition
     the selected positions (mutually exclusive; their union is the full set
-    of positions where ``labels != -100``). All five fields share the input's
-    shape and type.
+    of positions where ``labels != -100``). The five mask-and-token fields
+    share the input's shape and type; ``timesteps`` and ``weights`` hold one
+    float32 value per row, in the input's type.
 
     Attributes:
         sequences (ArrayLike of int, shape (B, L)): The corrupted tokens.
@@ -32,14 +33,25 @@ class MaskingResult(typing.NamedTuple):
         mutated (ArrayLike of bool, shape (B, L)): Replaced with a random
             valid token.
         kept (ArrayLike of bool, shape (B, L)): Selected but unchanged.
+        timesteps (ArrayLike of float32, shape (B,) | None): Each row's
+            timestep, in the rate policy's units (``[0, total_timesteps]``
+            for `ScheduleRate`, ``(0, 1]`` for `UniformTimestepRate`); None
+            for rates without time. Feed it to a time-conditioned model.
+        weights (ArrayLike of float32, shape (B,)): Each row's ELBO loss
+            weight, to multiply its summed masked-token cross-entropy by;
+            ones for rates without time. Exact for independent per-token
+            masking (`Bernoulli`), as in MDLM (Sahoo et al., 2024).
 
     Example:
         >>> import numpy as np
         >>> from takumi.masking import Bernoulli, FixedRate, MaskOnly
         >>> corruptor = Corruptor(FixedRate(0.5), Bernoulli(), MaskOnly(3), [0])
-        >>> sequences, labels, masked, mutated, kept = corruptor(np.full((2, 4), 7), seed=0)
-        >>> bool(((labels != -100) == (masked | mutated | kept)).all())
+        >>> result = corruptor(np.full((2, 4), 7), seed=0)
+        >>> selected = result.labels != -100
+        >>> bool((selected == (result.masked | result.mutated | result.kept)).all())
         True
+        >>> result.timesteps, result.weights.tolist()  # FixedRate has no time
+        (None, [1.0, 1.0])
     """
 
     sequences: backend.ArrayLike
@@ -47,6 +59,8 @@ class MaskingResult(typing.NamedTuple):
     masked: backend.ArrayLike
     mutated: backend.ArrayLike
     kept: backend.ArrayLike
+    timesteps: typing.Optional[backend.ArrayLike]
+    weights: backend.ArrayLike
 
 
 class Corruptor:
@@ -147,16 +161,18 @@ class Corruptor:
                 otherwise.
 
         Returns:
-            MaskingResult: ``(sequences, labels, masked, mutated, kept)``,
-            all of shape ``(B, L)`` and the input's type. ``labels`` holds
-            the original token at every selected position and ``-100``
-            elsewhere; ``masked`` / ``mutated`` / ``kept`` are boolean masks
-            partitioning the selected positions by outcome.
+            MaskingResult: ``(sequences, labels, masked, mutated, kept,
+            timesteps, weights)``. The first five are ``(B, L)`` and the
+            input's type: ``labels`` holds the original token at every
+            selected position and ``-100`` elsewhere; ``masked`` /
+            ``mutated`` / ``kept`` partition the selected positions by
+            outcome. ``timesteps`` and ``weights`` are ``(B,)`` per-row
+            values from the rate policy's `RateDraw`.
 
         Raises:
             ValueError: If ``focus`` has the wrong shape, the rate policy
                 needs an argument that is missing, or it returns a per-row
-                rate whose length is not ``B``.
+                rate, timesteps, or weights whose length is not ``B``.
 
         Example:
             >>> import numpy as np
@@ -178,18 +194,16 @@ class Corruptor:
         rng = np.random.default_rng(seed)
         ctx = CallContext(
             rng=rng,
-            seed=seed,
             timestep=timestep,
             index=index,
             batch_size=arr.shape[0],
         )
 
-        rate = self.rate(ctx)
-        if np.ndim(rate) != 0 and np.shape(rate) != (arr.shape[0],):
-            raise ValueError(
-                f"per-row rate must have shape ({arr.shape[0]},), got "
-                f"{np.shape(rate)}"
-            )
+        # The policy checks that per-row values have one entry per row.
+        rate, timesteps, weights = self.rate(ctx)
+        weights = np.asarray(weights, dtype=np.float32)
+        if timesteps is not None:
+            timesteps = np.asarray(timesteps, dtype=np.float32)
 
         excluded = (
             self.special_token_ids if excluded_ids is None else excluded_ids
@@ -209,4 +223,9 @@ class Corruptor:
             masked = backend.to_tensor(masked)
             mutated = backend.to_tensor(mutated)
             kept = backend.to_tensor(kept)
-        return MaskingResult(arr, labels, masked, mutated, kept)
+            weights = backend.to_tensor(weights)
+            if timesteps is not None:
+                timesteps = backend.to_tensor(timesteps)
+        return MaskingResult(
+            arr, labels, masked, mutated, kept, timesteps, weights
+        )

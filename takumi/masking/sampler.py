@@ -44,7 +44,7 @@ class MLMProbabilitySampler:
         ... )
         >>> sampler.sample(index=2)
         (0.5, 1.0, 0.0)
-        >>> sampler.sample(seed=0) in [(0.15, 0.8, 0.1), (0.3, 0.8, 0.1), (0.5, 1.0, 0.0)]
+        >>> sampler.sample(rng=0) in [(0.15, 0.8, 0.1), (0.3, 0.8, 0.1), (0.5, 1.0, 0.0)]
         True
     """
 
@@ -96,10 +96,10 @@ class MLMProbabilitySampler:
             >>> from takumi.masking import LinearScheduler
             >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=1)
             >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
-            >>> sampler.sample(seed=0)[0]
+            >>> sampler.sample(rng=0)[0]
             0.1
             >>> sampler.step()
-            >>> sampler.sample(seed=0)[0]
+            >>> sampler.sample(rng=0)[0]
             0.5
         """
         if self.scheduler is not None:
@@ -117,17 +117,74 @@ class MLMProbabilitySampler:
             >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
             >>> sampler.step()
             >>> sampler.reset()
-            >>> sampler.sample(seed=0)[0]
+            >>> sampler.sample(rng=0)[0]
             0.1
         """
         if self.scheduler is not None:
             self.scheduler.reset()
 
-    def sample_from_scheduler(self, seed: int | None = None) -> int:
+    def state_dict(self) -> typing.Dict[str, typing.Any]:
+        """What a checkpoint must save to resume sampling: the scheduler's step.
+
+        Returns:
+            dict: ``{"scheduler": scheduler.state_dict()}``, or ``{}`` without
+            a scheduler; JSON-serializable.
+
+        Example:
+            >>> from takumi.masking import LinearScheduler
+            >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=4)
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
+            >>> sampler.step()
+            >>> sampler.state_dict()
+            {'scheduler': {'step': 1}}
+        """
+        if self.scheduler is None:
+            return {}
+        return {"scheduler": self.scheduler.state_dict()}
+
+    def load_state_dict(self, state: typing.Dict[str, typing.Any]) -> None:
+        """Resume from a ``state_dict``.
+
+        Args:
+            state (dict): A dict from ``state_dict``.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If ``state`` and this sampler disagree on whether
+                there is a scheduler, or the step is out of range.
+
+        Example:
+            >>> from takumi.masking import LinearScheduler
+            >>> scheduler = LinearScheduler([1.0, 0.0], [0.0, 1.0], total_steps=1)
+            >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
+            >>> sampler.load_state_dict({"scheduler": {"step": 1}})
+            >>> sampler.sample(rng=0)[0]  # the curriculum's final weights
+            0.5
+        """
+        if self.scheduler is None:
+            if state:
+                raise ValueError(
+                    "state holds scheduler state, but this sampler has no "
+                    "scheduler"
+                )
+            return
+        if "scheduler" not in state:
+            raise ValueError(
+                "this sampler has a scheduler, but state holds no scheduler "
+                "state"
+            )
+        self.scheduler.load_state_dict(state["scheduler"])
+
+    def sample_from_scheduler(
+        self, rng: np.random.Generator | int | None = None
+    ) -> int:
         """Draw a candidate index from the scheduler's current weights.
 
         Args:
-            seed (int | None): Seed for the draw.
+            rng (np.random.Generator | int | None): Generator to draw from,
+                or a seed to build one.
 
         Returns:
             int: An index in ``[0, N)``. All-zero weights fall back to a
@@ -140,10 +197,10 @@ class MLMProbabilitySampler:
             >>> from takumi.masking import LinearScheduler
             >>> scheduler = LinearScheduler([0.0, 1.0], [0.0, 1.0], total_steps=1)
             >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1], scheduler)
-            >>> sampler.sample_from_scheduler(seed=0)
+            >>> sampler.sample_from_scheduler(rng=0)
             1
         """
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(rng)
         weights = np.asarray(self.scheduler.sample(), dtype=np.float64)
         ensure_non_negative(weights, name="scheduler weights")
         total = weights.sum()
@@ -152,33 +209,36 @@ class MLMProbabilitySampler:
         # All-zero weights: fall back to uniform.
         return int(rng.integers(0, self.num_candidates))
 
-    def sample_randomly(self, seed: int | None = None) -> int:
+    def sample_randomly(
+        self, rng: np.random.Generator | int | None = None
+    ) -> int:
         """Draw a candidate index uniformly at random.
 
         Args:
-            seed (int | None): Seed for the draw.
+            rng (np.random.Generator | int | None): Generator to draw from,
+                or a seed to build one.
 
         Returns:
             int: An index in ``[0, N)``.
 
         Example:
             >>> sampler = MLMProbabilitySampler([0.1, 0.5], [0.8, 0.8], [0.1, 0.1])
-            >>> sampler.sample_randomly(seed=0) in (0, 1)
+            >>> sampler.sample_randomly(rng=0) in (0, 1)
             True
         """
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(rng)
         return int(rng.integers(0, self.num_candidates))
 
     def sample(
         self,
-        seed: int | None = None,
+        rng: np.random.Generator | int | None = None,
         index: int | None = None,
     ) -> typing.Tuple[float, float, float]:
         """Pick a candidate triple: pinned, scheduled, or uniform.
 
         Args:
-            seed (int | None): Seed for the draw; ignored when ``index`` is
-                given.
+            rng (np.random.Generator | int | None): Generator to draw from,
+                or a seed to build one; unused when ``index`` is given.
             index (int | None): Pins the candidate, in ``[0, N)``.
 
         Returns:
@@ -200,9 +260,9 @@ class MLMProbabilitySampler:
                 )
             idx = index
         elif self.scheduler is not None:
-            idx = self.sample_from_scheduler(seed=seed)
+            idx = self.sample_from_scheduler(rng=rng)
         else:
-            idx = self.sample_randomly(seed=seed)
+            idx = self.sample_randomly(rng=rng)
 
         return (
             float(self.mlm_probs[idx]),

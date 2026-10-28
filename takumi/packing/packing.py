@@ -107,6 +107,13 @@ class PackingPlan:
             [[0, 5], [2, 3], [1, 4]]
             >>> list(plan.iter_bins(seed=1, interleave=True))
             [[2, 3], [1, 4], [0, 5]]
+
+            Resuming mid-epoch: an epoch is a pure function of its seed, so
+            skip the bins already consumed.
+
+            >>> import itertools
+            >>> list(itertools.islice(plan.iter_bins(seed=0), 1, None))
+            [[2, 3], [1, 4]]
         """
         return stream_packed_bins(
             self.templates, self.index_pools, seed=seed, interleave=interleave

@@ -134,7 +134,7 @@ class CategoricalMasker(Corruptor):
     custom `CorruptionScheme` instead.
 
     Args:
-        mlm_prob_sampler (Any): Object with ``sample(seed, index)``, such as
+        mlm_prob_sampler (Any): Object with ``sample(rng, index)``, such as
             `MLMProbabilitySampler`; see `SampledRate`.
         mask_token_id (int): The mask token's id.
         valid_token_ids (Sequence[int]): Substitution pool for mutations.
@@ -180,7 +180,9 @@ class DiffusionMasker(Corruptor):
     """Mask-only corruption at a schedule-driven timestep rate.
 
     Call with ``timestep=`` in ``[0, total_timesteps]``, a scalar or one per
-    row.
+    row. ``time`` says whether those timesteps are whole-number steps or
+    real values, which picks the ELBO weight in ``result.weights``; see
+    `ScheduleRate`.
 
     Args:
         total_timesteps (int): ``T``, ``> 0``.
@@ -190,10 +192,12 @@ class DiffusionMasker(Corruptor):
             The schedule; see `resolve_schedule`.
         focus_strategy (str): `FocusBiased` strategy for call-time ``focus``.
         focus_strength (float): `FocusBiased` strength, ``>= 0``.
+        time (str): ``"discrete"`` or ``"continuous"``; required.
 
     Example:
         >>> import numpy as np
-        >>> masker = DiffusionMasker(1000, mask_token_id=3, special_token_ids=[0])
+        >>> masker = DiffusionMasker(1000, mask_token_id=3, special_token_ids=[0],
+        ...                          time="discrete")
         >>> tokens = np.full((2, 1000), 50)
         >>> result = masker(tokens, seed=0, timestep=np.array([0, 500]))
         >>> [round(float(m), 1) for m in result.masked.mean(axis=1)]
@@ -208,9 +212,11 @@ class DiffusionMasker(Corruptor):
         schedule: typing.Union[str, typing.Callable] = "cosine",
         focus_strategy: str = "multiplicative",
         focus_strength: float = 2.0,
+        *,
+        time: str,
     ):
         super().__init__(
-            rate=ScheduleRate(total_timesteps, schedule),
+            rate=ScheduleRate(total_timesteps, schedule, time=time),
             select=FocusBiased(focus_strategy, focus_strength),
             corrupt=MaskOnly(mask_token_id),
             special_token_ids=special_token_ids,

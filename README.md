@@ -132,6 +132,7 @@ diffusion = DiffusionMasker(
     mask_token_id=3,
     special_token_ids=[0, 1, 2, 3],
     schedule="cosine",  # MaskGIT's; or "linear", "sqrt", or a callable
+    time="discrete",    # whole-number timesteps; "continuous" for real ones
 )
 result = diffusion(x, seed=10, timestep=500)
 result = diffusion(x, seed=10, timestep=torch.randint(0, 1001, (8,)))  # per row
@@ -139,6 +140,39 @@ result = diffusion(x, seed=10, timestep=torch.randint(0, 1001, (8,)))  # per row
 maskgit = MaskGITMasker(mask_token_id=3, special_token_ids=[0, 1, 2, 3])
 result = maskgit(x, seed=10)  # each row draws its own timestep
 ```
+
+### ELBO loss weights (masked diffusion)
+
+Every result also carries one value per row: `result.timesteps` (each row's
+noise level, for time-conditioned models; `None` for rates without time) and
+`result.weights`, the masked-diffusion ELBO weight. Multiplying each row's
+summed masked-token cross-entropy by its weight gives the MDLM / MD4
+objective, an upper bound on the negative log-likelihood. `ScheduleRate` (so
+`DiffusionMasker`) takes a required `time`: `"discrete"` for whole-number
+steps drawn from 1..T, which gets the exact discrete-time weight, or
+`"continuous"` for real-valued steps, which gets `p′(t)/p(t)`.
+`UniformTimestepRate` draws real `t`, so it always uses `p′(t)/p(t)`. Rates without time give weights of 1, i.e. plain MLM loss.
+
+```python
+import torch.nn.functional as F
+
+steps = torch.randint(1, 1001, (8,))  # 1..T: step 0 masks nothing
+result = diffusion(x, seed=10, timestep=steps)
+logits = model(result.sequences)                       # (B, L, V)
+ce = F.cross_entropy(logits.transpose(1, 2), result.labels,
+                     ignore_index=-100, reduction="none")  # (B, L)
+loss = (result.weights * ce.sum(1)).sum() / x.numel()  # NELBO per token
+```
+
+The weights are exact for independent per-token masking (`DiffusionMasker`
+without `focus`); with exact-count masking (`MaskGITMasker`) they are an
+approximation.
+
+With real-valued `t`, rows near `t = 0` mask almost nothing and get huge
+weights, which can spike small-batch training. Every schedule takes an
+optional floor on the masking probability, e.g. `CosineSchedule(eps=1e-3)`:
+masking and both weights then use `eps + (1 - eps) * p(t)`, so weights stay
+near `1 / eps` or below. Integer timesteps are already capped at `T`.
 
 ### MaskGIT decoding
 
@@ -217,7 +251,7 @@ result = corruptor(x, seed=10)
 Available pieces:
 
 - rates — `FixedRate(rate)`, `BetaRate(mean, concentration)`,
-  `SampledRate(sampler)`, `ScheduleRate(total_timesteps, schedule)`,
+  `SampledRate(sampler)`, `ScheduleRate(total_timesteps, schedule, time=...)`,
   `UniformTimestepRate(schedule)` (one rate per row)
 - selectors — `Bernoulli()`, `FocusBiased(strategy, strength)`, `Spans(...)`,
   `ExactCount()`
@@ -234,6 +268,30 @@ result = corruptor(
     focus=focus_mask,         # (B, L) bool mask to bias selection toward
     timestep=500,             # required by ScheduleRate (scalar or (B,)), ignored otherwise
 )
+```
+
+## Resuming a run
+
+A resumed run reproduces the original when three things are restored:
+
+- **Curriculum.** Schedulers and `MLMProbabilitySampler` have `state_dict()` /
+  `load_state_dict()`; save the dict in your checkpoint (or hand the object to
+  Accelerate's `register_for_checkpointing`). Schedulers refuse plain pickling
+  because their step is shared across DataLoader workers; loading the state
+  updates every worker, running or not.
+- **Data order.** An epoch is a pure function of its seed, so seed each epoch
+  (e.g. `seed=epoch`) and skip the bins already consumed:
+  `itertools.islice(plan.iter_bins(seed=epoch), bins_done, None)`.
+- **Masking.** Derive each call's seed instead of drawing it, e.g.
+  `seed_from_components(base_seed, epoch, index)`, so the same sample gets the
+  same masks after a restart.
+
+```python
+# save
+checkpoint["curriculum"] = sampler.state_dict()
+
+# resume
+sampler.load_state_dict(checkpoint["curriculum"])
 ```
 
 ## The C++ part

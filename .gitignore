@@ -218,3 +218,4 @@ __marimo__/
 .streamlit/secrets.toml
 
 third_party/
+lessons/
