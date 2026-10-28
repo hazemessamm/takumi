@@ -36,7 +36,8 @@ def pack_first_fit(
         tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
             lengths in the same bucket count as ties.
         seed (int | None): Shuffles ties reproducibly on a given platform;
-            ``None`` breaks ties by original index.
+            any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties
+            by original index.
 
     Returns:
         list[list[int]]: Bins, each a list of indices into ``lengths``.
@@ -75,7 +76,8 @@ def pack_worst_fit(
         tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
             lengths in the same bucket count as ties.
         seed (int | None): Shuffles ties reproducibly on a given platform;
-            ``None`` breaks ties by original index.
+            any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties
+            by original index.
 
     Returns:
         list[list[int]]: Bins, each a list of indices into ``lengths``.

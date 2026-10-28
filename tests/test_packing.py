@@ -74,6 +74,23 @@ def test_seed_is_reproducible():
     assert a == b
 
 
+# 14904199615042885880 is seed_from_components(42, 0, 7): that helper returns
+# seeds in [0, 2**64), half of them >= 2**63. Written out so packing tests
+# don't import takumi.masking, which needs torch.
+@pytest.mark.parametrize("seed", [2**63, 2**64 - 1, 14904199615042885880])
+def test_seed_accepts_the_full_64_bit_range(seed):
+    lengths = [5, 5, 5, 4, 4, 3, 2, 2, 1]
+    assert pack_first_fit(lengths, 10, seed=seed) == pack_first_fit(
+        lengths, 10, seed=seed
+    )
+
+
+@pytest.mark.parametrize("seed", [-1, 2**64])
+def test_seed_outside_64_bit_range_is_rejected(seed):
+    with pytest.raises(TypeError):
+        pack_first_fit([5, 4, 3], 10, seed=seed)
+
+
 def test_seed_produces_valid_packing():
     lengths = [5, 5, 5, 4, 4, 3, 2, 2, 1]
     bins = pack_first_fit(lengths, 10, seed=7)

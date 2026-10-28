@@ -82,7 +82,7 @@ void require_fits(
 std::vector<std::size_t> order_by_size(
     const std::vector<std::int64_t>& lengths,
     std::int64_t tolerance,
-    std::optional<std::int64_t> seed = std::nullopt) {
+    std::optional<std::uint64_t> seed = std::nullopt) {
     // The bucket key below divides by `tolerance`. Integer division by zero is
     // undefined behaviour in C++ — it yields 0 on arm64 (silently collapsing
     // every item into one bucket) but raises SIGFPE on x86-64, killing the
@@ -137,7 +137,7 @@ std::vector<std::vector<std::int64_t>> pack_first_fit(
     const std::vector<std::int64_t>& lengths,
     std::int64_t max_length,
     std::int64_t tolerance,
-    std::optional<std::int64_t> seed) {
+    std::optional<std::uint64_t> seed) {
 
     require_fits(lengths, max_length);
     const std::vector<std::size_t> order = order_by_size(lengths, tolerance, seed);
@@ -173,7 +173,7 @@ std::vector<std::vector<std::int64_t>> pack_worst_fit(
     const std::vector<std::int64_t>& lengths,
     std::int64_t max_length,
     std::int64_t tolerance,
-    std::optional<std::int64_t> seed) {
+    std::optional<std::uint64_t> seed) {
 
     require_fits(lengths, max_length);
     const std::vector<std::size_t> order = order_by_size(lengths, tolerance, seed);
@@ -402,7 +402,8 @@ Args:
     tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
         lengths in the same bucket count as ties.
     seed (int | None): Shuffles ties reproducibly on a given platform;
-        ``None`` breaks ties by original index.
+        any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties by
+        original index.
 
 Returns:
     list[list[int]]: Bins, each a list of indices into ``lengths``.
@@ -438,7 +439,8 @@ Args:
     tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
         lengths in the same bucket count as ties.
     seed (int | None): Shuffles ties reproducibly on a given platform;
-        ``None`` breaks ties by original index.
+        any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties by
+        original index.
 
 Returns:
     list[list[int]]: Bins, each a list of indices into ``lengths``.
