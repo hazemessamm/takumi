@@ -123,6 +123,8 @@ def sample(
     else:
         generator = None
         if rng is not None:
+            # torch's CPU generator keeps only the low 32 bits of this seed;
+            # CUDA's Philox keeps all 64.
             generator = torch.Generator(device=logits.device)
             generator.manual_seed(
                 int(np.random.default_rng(rng).integers(2**63))
