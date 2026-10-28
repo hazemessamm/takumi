@@ -85,6 +85,14 @@ def test_seed_accepts_the_full_64_bit_range(seed):
     )
 
 
+def test_seed_bits_above_32_change_the_packing():
+    # std::mt19937 kept only the low 32 bits, so these two seeds collided.
+    lengths = [5] * 40  # all tied: the seed alone orders them
+    assert pack_first_fit(lengths, 10, seed=1) != pack_first_fit(
+        lengths, 10, seed=1 + 2**32
+    )
+
+
 @pytest.mark.parametrize("seed", [-1, 2**64])
 def test_seed_outside_64_bit_range_is_rejected(seed):
     with pytest.raises(TypeError):

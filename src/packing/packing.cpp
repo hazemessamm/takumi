@@ -75,7 +75,7 @@ void require_fits(
 // seed is set (shuffled): give each item a random tie-breaker and sort by
 // (bucket descending, tie_breaker ascending) — the same ordering numpy gets
 // from np.lexsort((tie_breakers, -buckets)).
-//   NOTE on fidelity: the tie-breakers come from std::mt19937, NOT numpy's
+//   NOTE on fidelity: the tie-breakers come from std::mt19937_64, NOT numpy's
 //   PCG64. So the output is reproducible given a seed but is NOT identical to
 //   the original numpy `seed` output — a deliberate choice. Matching numpy
 //   bit-for-bit would require reimplementing PCG64.
@@ -103,7 +103,9 @@ std::vector<std::size_t> order_by_size(
     }
 
     if (seed.has_value()) {
-        std::mt19937 gen(seed.value());
+        // The 64-bit engine, so every bit of the seed counts: std::mt19937
+        // keeps only the low 32, making seeds 2**32 apart identical.
+        std::mt19937_64 gen(seed.value());
         std::uniform_real_distribution<double> dist(0.0, 1.0);
 
         std::vector<double> tie_breakers(n);

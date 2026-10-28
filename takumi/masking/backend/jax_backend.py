@@ -115,8 +115,12 @@ def sample(
     if temperature == 0.0:
         sampled = jax.numpy.argmax(logits, axis=-1)
     else:
-        seed = int(np.random.default_rng(rng).integers(2**31))
-        key = jax.random.key(seed)
+        # A 64-bit key from two 32-bit draws: without x64, jax.random.key
+        # keeps only the low 32 bits of an int seed, so fold in the rest.
+        low, high = np.random.default_rng(rng).integers(
+            0, 2**32, size=2, dtype=np.uint32
+        )
+        key = jax.random.fold_in(jax.random.key(int(low)), int(high))
         sampled = jax.random.categorical(key, logits / temperature, axis=-1)
 
     probs = jax.nn.softmax(logits, axis=-1)
