@@ -6,7 +6,7 @@ module bound to ``backend``. Both modules expose the same interface:
 - ``to_tensor(x)`` / ``to_numpy(x)`` — convert between NumPy and the
   framework's array type.
 - ``framework(x)`` — the backend's name, ``"torch"`` or ``"jax"``.
-- ``sample(logits, mask_token_id, temperature, seed)`` — on-device sampling
+- ``sample(logits, mask_token_id, temperature, rng)`` — on-device sampling
   of one token per position, for `MaskGITDecoder`.
 - ``token_probs(logits, tokens)`` — on-device probability of the tokens
   already in a sequence, for `MaskGITDecoder`'s confidence remasking.

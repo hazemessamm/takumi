@@ -67,7 +67,7 @@ def sample(
     logits: jax.numpy.ndarray,
     mask_token_id: typing.Optional[int] = None,
     temperature: float = 1.0,
-    seed: typing.Optional[int] = None,
+    rng: typing.Union[np.random.Generator, int, None] = None,
 ) -> typing.Tuple[jax.numpy.ndarray, jax.numpy.ndarray]:
     """Sample one token per position from logits, on the logits' device.
 
@@ -82,8 +82,10 @@ def sample(
             needs no blocking and is ignored.
         temperature (float): Sampling temperature, ``>= 0``. ``0`` takes the
             argmax; higher values flatten the distribution.
-        seed (int | None): Seed for the PRNG key. ``None`` draws a fresh one,
-            so repeated calls differ.
+        rng (np.random.Generator | int | None): Generator the PRNG key's
+            seed is drawn from, or a seed to build one. Pass
+            ``decoder.rng`` so sampling shares the decoder's stream. ``None``
+            draws a fresh key, so repeated calls differ.
 
     Returns:
         tuple[jax.Array, jax.Array]: ``(sampled, probs)``, both of shape
@@ -113,8 +115,7 @@ def sample(
     if temperature == 0.0:
         sampled = jax.numpy.argmax(logits, axis=-1)
     else:
-        if seed is None:
-            seed = int(np.random.default_rng().integers(2**31))
+        seed = int(np.random.default_rng(rng).integers(2**31))
         key = jax.random.key(seed)
         sampled = jax.random.categorical(key, logits / temperature, axis=-1)
 

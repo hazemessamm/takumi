@@ -289,7 +289,7 @@ def test_maskgit_masker_count_distribution():
 def test_remask_count_is_binomial_in_committed_tokens():
     rows, length, p = 4000, 32, 0.3
     decoder = MaskGITDecoder(MASK, total_steps=4, remask_prob=p,
-                             remask_window=(0.5, 0.5))  # step 1 only
+                             remask_window=(0.5, 0.5), seed=1)  # step 1 only
     rng = np.random.default_rng(0)
     tokens = np.full((rows, length), MASK)
     generated = tokens == MASK
@@ -297,7 +297,7 @@ def test_remask_count_is_binomial_in_committed_tokens():
     def step(tokens, index):
         sampled = rng.integers(10, 60, (rows, length))
         probs = rng.random((rows, length))
-        return decoder(tokens, sampled, probs, index, length, seed=index,
+        return decoder(tokens, sampled, probs, index, length,
                        generated=generated)
 
     tokens = step(tokens, 0)
@@ -310,7 +310,7 @@ def test_remask_count_is_binomial_in_committed_tokens():
 def test_backend_sample_follows_tempered_softmax(temperature):
     row = np.array([2.0, 1.0, 0.0], dtype=np.float32)
     logits = np.broadcast_to(row, (1, 50000, 3)).copy()
-    sampled, _ = backend.sample(logits, temperature=temperature, seed=0)
+    sampled, _ = backend.sample(logits, temperature=temperature, rng=0)
     sampled = backend.to_numpy(sampled).ravel()
     expected = np.exp(row / temperature) / np.exp(row / temperature).sum()
     for token, p in enumerate(expected):
@@ -321,7 +321,7 @@ def test_backend_sample_renormalizes_without_the_mask_id():
     logits = np.broadcast_to(
         np.array([1.0, 1.0, 5.0], dtype=np.float32), (1, 50000, 3)
     ).copy()
-    sampled, _ = backend.sample(logits, mask_token_id=2, seed=0)
+    sampled, _ = backend.sample(logits, mask_token_id=2, rng=0)
     sampled = backend.to_numpy(sampled).ravel()
     assert not np.any(sampled == 2)
     assert_proportion(int((sampled == 0).sum()), sampled.size, 0.5)

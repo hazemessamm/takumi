@@ -185,16 +185,21 @@ probabilities reach the decoder.
 ```python
 from takumi.masking import MaskGITDecoder, backend
 
-decoder = MaskGITDecoder(mask_token_id=3, total_steps=12)
+decoder = MaskGITDecoder(mask_token_id=3, total_steps=12, seed=0)
 
 tokens = torch.full((8, 200), 3)  # start fully masked
 for step in range(12):
-    sampled, probs = backend.sample(model(tokens), mask_token_id=3)
+    sampled, probs = backend.sample(model(tokens), mask_token_id=3,
+                                    rng=decoder.rng)
     tokens = decoder(tokens, sampled, probs, step, num_unknown=200)
 ```
 
-`backend.sample` never draws `mask_token_id`, takes `temperature=0.0` for
-greedy decoding, and accepts `seed=` for a reproducible draw.
+`backend.sample` never draws `mask_token_id` and takes `temperature=0.0` for
+greedy decoding. The decoder owns the run's random stream: each step draws
+fresh noise from it, and `rng=decoder.rng` puts token sampling on the same
+stream, so `seed` reproduces the whole run. Call `decoder.reset(seed)` before
+each new run to pick its seed; `reset()` with no seed draws a fresh one, and
+`decoder.seed` records it so `decoder.reset(decoder.seed)` replays the run.
 
 #### Remasking committed tokens
 
@@ -212,13 +217,14 @@ decoder = MaskGITDecoder(
     total_steps=24,
     remask_prob=0.1,
     remask_window=(0.25, 0.75),  # progress range where remasking applies
+    seed=0,
 )
 
 tokens = torch.full((8, 200), 3)
 generated = tokens == 3  # what may be re-masked; prompt tokens are left alone
 for step in range(24):
     logits = model(tokens)
-    sampled, probs = backend.sample(logits, mask_token_id=3)
+    sampled, probs = backend.sample(logits, mask_token_id=3, rng=decoder.rng)
     current = backend.token_probs(logits, tokens)
     tokens = decoder(tokens, sampled, probs, step, num_unknown=200,
                      generated=generated, current_probs=current)

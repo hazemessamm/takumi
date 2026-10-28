@@ -71,7 +71,7 @@ def sample(
     logits: torch.Tensor,
     mask_token_id: typing.Optional[int] = None,
     temperature: float = 1.0,
-    seed: typing.Optional[int] = None,
+    rng: typing.Union[np.random.Generator, int, None] = None,
 ) -> typing.Tuple[torch.Tensor, torch.Tensor]:
     """Sample one token per position from logits, on the logits' device.
 
@@ -86,7 +86,10 @@ def sample(
             needs no blocking and is ignored.
         temperature (float): Sampling temperature, ``>= 0``. ``0`` takes the
             argmax; higher values flatten the distribution.
-        seed (int | None): If given, makes the draw reproducible.
+        rng (np.random.Generator | int | None): Generator the torch seed
+            is drawn from, or a seed to build one. Pass ``decoder.rng`` so
+            sampling shares the decoder's stream. ``None`` uses torch's
+            global RNG.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: ``(sampled, probs)``, both of
@@ -119,9 +122,11 @@ def sample(
         sampled = logits.argmax(dim=-1)
     else:
         generator = None
-        if seed is not None:
+        if rng is not None:
             generator = torch.Generator(device=logits.device)
-            generator.manual_seed(int(seed))
+            generator.manual_seed(
+                int(np.random.default_rng(rng).integers(2**63))
+            )
         tempered = torch.softmax(logits / temperature, dim=-1)
         flat = tempered.reshape(-1, tempered.shape[-1])
         sampled = torch.multinomial(flat, 1, generator=generator)

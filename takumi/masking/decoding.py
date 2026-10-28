@@ -48,7 +48,10 @@ class MaskGITDecoder:
     keep more randomly and later ones more greedily.
 
     `backend.sample` turns ``(B, L, V)`` logits into the ``sampled`` /
-    ``probs`` pair on the model's device.
+    ``probs`` pair on the model's device. Pass it ``rng=decoder.rng`` so
+    token sampling draws from the decoder's stream too, making the whole run
+    a function of ``seed``. Each step draws fresh noise from that stream;
+    call `reset` to start the next run from a chosen seed.
 
     Plain MaskGIT never revisits a committed token, so an early mistake
     stays. ``remask_prob`` turns on ReMDM-style remasking: on steps whose
@@ -74,6 +77,14 @@ class MaskGITDecoder:
             MaskGIT.
         remask_window (tuple[float, float]): ``(start, end)`` progress range,
             ``0 <= start <= end <= 1``, in which remasking applies.
+        seed (int | None): Seed for the random stream, ``>= 0``. ``None``
+            draws one from the OS.
+
+    Attributes:
+        seed (int): The seed the current stream started from, also when
+            ``None`` was passed, so ``reset(decoder.seed)`` replays a run.
+        rng (np.random.Generator): The run's random stream. Not safe to
+            share across threads, and a pickled or forked copy repeats it.
 
     Raises:
         ValueError: If ``total_steps`` is not positive, ``temperature`` is
@@ -83,13 +94,13 @@ class MaskGITDecoder:
     Example:
         >>> import numpy as np
         >>> from takumi.masking import backend
-        >>> decoder = MaskGITDecoder(mask_token_id=3, total_steps=4)
+        >>> decoder = MaskGITDecoder(mask_token_id=3, total_steps=4, seed=0)
         >>> tokens = np.full((2, 8), 3)  # start fully masked
-        >>> rng = np.random.default_rng(0)
+        >>> model_rng = np.random.default_rng(1)
         >>> for step in range(4):
-        ...     logits = rng.normal(size=(2, 8, 16))  # stand-in for model(tokens)
-        ...     sampled, probs = backend.sample(logits, mask_token_id=3, seed=step)
-        ...     tokens = decoder(tokens, sampled, probs, step, num_unknown=8, seed=step)
+        ...     logits = model_rng.normal(size=(2, 8, 16))  # stand-in for model(tokens)
+        ...     sampled, probs = backend.sample(logits, mask_token_id=3, rng=decoder.rng)
+        ...     tokens = decoder(tokens, sampled, probs, step, num_unknown=8)
         ...     print(step, int((tokens == 3).sum()))  # floor(8 * cos(...)) per row
         0 14
         1 10
@@ -98,14 +109,14 @@ class MaskGITDecoder:
 
         With remasking between 25% and 75% of the way through:
 
-        >>> decoder = MaskGITDecoder(3, total_steps=8, remask_prob=0.3)
+        >>> decoder = MaskGITDecoder(3, total_steps=8, remask_prob=0.3, seed=0)
         >>> tokens = np.full((2, 8), 3)
         >>> generated = tokens == 3  # positions being generated
         >>> for step in range(8):
-        ...     logits = rng.normal(size=(2, 8, 16))
-        ...     sampled, probs = backend.sample(logits, mask_token_id=3, seed=step)
+        ...     logits = model_rng.normal(size=(2, 8, 16))
+        ...     sampled, probs = backend.sample(logits, mask_token_id=3, rng=decoder.rng)
         ...     current = backend.token_probs(logits, tokens)
-        ...     tokens = decoder(tokens, sampled, probs, step, num_unknown=8, seed=step,
+        ...     tokens = decoder(tokens, sampled, probs, step, num_unknown=8,
         ...                      generated=generated, current_probs=current)
         >>> int((tokens == 3).sum())
         0
@@ -119,6 +130,7 @@ class MaskGITDecoder:
         temperature: float = 4.5,
         remask_prob: float = 0.0,
         remask_window: typing.Tuple[float, float] = (0.25, 0.75),
+        seed: int | None = None,
     ):
         if total_steps <= 0:
             raise ValueError(f"total_steps must be > 0, got {total_steps}")
@@ -140,6 +152,39 @@ class MaskGITDecoder:
         self.temperature = float(temperature)
         self.remask_prob = float(remask_prob)
         self.remask_window = (float(start), float(end))
+        self.reset(seed)
+
+    def reset(self, seed: int | None = None) -> None:
+        """Restart the random stream, as if the decoder were built anew.
+
+        Call before each run to start it from a chosen seed. With no seed it
+        draws a fresh one rather than replaying the last run, so a forgotten
+        seed gives new noise, never repeated noise.
+
+        Args:
+            seed (int | None): Seed for the new stream, ``>= 0``. ``None``
+                draws one from the OS; it is kept as ``self.seed`` either
+                way, so ``reset(decoder.seed)`` replays the run.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If ``seed`` is negative.
+
+        Example:
+            >>> import numpy as np
+            >>> decoder = MaskGITDecoder(mask_token_id=3, total_steps=2)
+            >>> tokens = np.full((1, 6), 3)
+            >>> probs = np.full((1, 6), 0.5)  # all tied: the noise decides
+            >>> first = decoder(tokens, tokens + 10, probs, 0, 6)
+            >>> decoder.reset(decoder.seed)
+            >>> again = decoder(tokens, tokens + 10, probs, 0, 6)
+            >>> bool((first == again).all())
+            True
+        """
+        self.seed = np.random.SeedSequence(seed).entropy
+        self.rng = np.random.default_rng(self.seed)
 
     def __call__(
         self,
@@ -148,11 +193,10 @@ class MaskGITDecoder:
         probs: backend.ArrayLike,
         step: int,
         num_unknown: typing.Union[int, backend.ArrayLike],
-        seed: int | None = None,
         generated: typing.Optional[backend.ArrayLike] = None,
         current_probs: typing.Optional[backend.ArrayLike] = None,
     ) -> backend.ArrayLike:
-        """Advance decoding by one step.
+        """Advance decoding by one step, drawing noise from ``self.rng``.
 
         Args:
             sequences (ArrayLike of int, shape (B, L)): Current tokens, with
@@ -165,7 +209,6 @@ class MaskGITDecoder:
             num_unknown (int | ArrayLike of int, shape (B,)): Unknown
                 positions per row before step 0. The schedule is a fraction
                 of this.
-            seed (int | None): If given, makes the step reproducible.
             generated (ArrayLike of bool, shape (B, L) | None): Positions
                 that were unknown before step 0, the only ones remasking may
                 touch; prompt and conditioning tokens stay put. Required
@@ -219,11 +262,10 @@ class MaskGITDecoder:
                 1, np.minimum(unknown.sum(axis=1) - 1, mask_len)
             )
 
-            rng = np.random.default_rng(seed)
             with np.errstate(divide="ignore"):
                 confidence = np.log(backend.to_numpy(probs).astype(np.float64))
             noise = self.temperature * (1.0 - progress)
-            confidence = confidence + noise * rng.gumbel(size=arr.shape)
+            confidence = confidence + noise * self.rng.gumbel(size=arr.shape)
             confidence = np.where(unknown, confidence, np.inf)
             out[_lowest(confidence, mask_len) & unknown] = self.mask_token_id
 
@@ -233,10 +275,12 @@ class MaskGITDecoder:
                 # were just chosen by confidence above.
                 committed = backend.to_numpy(generated).astype(bool) & ~unknown
                 if current_probs is None:
-                    scores = rng.random(arr.shape)
+                    scores = self.rng.random(arr.shape)
                 else:
                     scores = backend.to_numpy(current_probs).astype(np.float64)
-                counts = rng.binomial(committed.sum(axis=1), self.remask_prob)
+                counts = self.rng.binomial(
+                    committed.sum(axis=1), self.remask_prob
+                )
                 scores = np.where(committed, scores, np.inf)
                 out[_lowest(scores, counts)] = self.mask_token_id
 
