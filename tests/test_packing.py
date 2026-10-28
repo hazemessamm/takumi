@@ -85,6 +85,23 @@ def test_seed_accepts_the_full_64_bit_range(seed):
     )
 
 
+def test_golden_seeded_packing():
+    # Pins the seeded tie order. CI runs this on Linux, macOS and Windows
+    # (libstdc++, libc++, MSVC), so passing everywhere is what backs "same
+    # seed, same packing on every platform": the tie-breakers are raw
+    # mt19937_64 output, which the C++ standard fixes bit for bit.
+    lengths = [5, 3, 5, 2, 3, 5, 2, 3, 4, 1]
+    assert pack_first_fit(lengths, 8, seed=0) == [
+        [2, 7], [5, 4], [0, 1], [8, 3, 6], [9],
+    ]
+    assert pack_first_fit(lengths, 8, seed=2**64 - 1) == [
+        [0, 7], [2, 1], [5, 4], [8, 6, 3], [9],
+    ]
+    assert pack_first_fit(lengths, 8, tolerance=2, seed=7) == [
+        [5, 4], [2, 6, 9], [8, 3], [0, 7], [1],
+    ]
+
+
 def test_seed_bits_above_32_change_the_packing():
     # std::mt19937 kept only the low 32 bits, so these two seeds collided.
     lengths = [5] * 40  # all tied: the seed alone orders them

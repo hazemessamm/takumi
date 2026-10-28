@@ -22,7 +22,8 @@ bins = pack(lengths, max_length=10, algorithm="worst_fit", tolerance=2, seed=42)
 
 - `tolerance` — bucket width for the longest-first sort; lengths in the same
   bucket count as ties.
-- `seed` — shuffles ties reproducibly; `None` keeps a deterministic stable sort.
+- `seed` — shuffles ties, the same way on every platform; `None` keeps a
+  deterministic stable sort.
 
 ### Histogram packing (reusable blueprint)
 

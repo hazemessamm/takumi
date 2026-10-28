@@ -6,8 +6,9 @@ yields its bins for a single epoch, drawing dataset indices from the pools
 without replacement so every sequence appears exactly once. All randomness
 flows through numpy's ``default_rng(seed)``, and the inputs are read in sorted
 order rather than dict order, so a given seed reproduces the same epoch on
-every platform — the reason this stays in Python rather than the C++ core,
-whose ``std::`` distributions are not portably reproducible. NumPy freezes
+every platform — the reason this stays in Python rather than the C++ core:
+``std::shuffle`` and the ``std::`` distributions are not portably
+reproducible. NumPy freezes
 its bit generators but not the output of ``Generator`` methods across
 releases (NEP 19); tests/test_stream.py pins a golden epoch so CI notices if
 an upgrade ever changes it.

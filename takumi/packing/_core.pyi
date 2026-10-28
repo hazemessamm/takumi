@@ -35,7 +35,7 @@ def pack_first_fit(
         max_length (int): Bin capacity in tokens.
         tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
             lengths in the same bucket count as ties.
-        seed (int | None): Shuffles ties reproducibly on a given platform;
+        seed (int | None): Shuffles ties reproducibly on every platform;
             any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties
             by original index.
 
@@ -75,7 +75,7 @@ def pack_worst_fit(
         max_length (int): Bin capacity in tokens.
         tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
             lengths in the same bucket count as ties.
-        seed (int | None): Shuffles ties reproducibly on a given platform;
+        seed (int | None): Shuffles ties reproducibly on every platform;
             any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties
             by original index.
 

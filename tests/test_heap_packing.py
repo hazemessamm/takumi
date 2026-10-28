@@ -86,3 +86,12 @@ def test_seed_is_reproducible():
     a = pack_worst_fit(lengths, 10, seed=42)
     b = pack_worst_fit(lengths, 10, seed=42)
     assert a == b
+
+
+def test_golden_seeded_packing():
+    # Same seed, same packing on Linux, macOS and Windows; see the matching
+    # test in test_packing.py.
+    lengths = [5, 3, 5, 2, 3, 5, 2, 3, 4, 1]
+    assert pack_worst_fit(lengths, 8, seed=0) == [
+        [2, 3], [5, 1], [0, 4], [8, 7], [6, 9],
+    ]

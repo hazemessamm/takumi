@@ -73,8 +73,9 @@ void require_fits(
 //   tie-order is not.
 //
 // seed is set (shuffled): give each item a random tie-breaker and sort by
-// (bucket descending, tie_breaker ascending) — the same ordering numpy gets
-// from np.lexsort((tie_breakers, -buckets)).
+// (bucket descending, tie_breaker ascending, index ascending) — the same
+// ordering numpy gets from np.lexsort((tie_breakers, -buckets)). Same seed,
+// same order on every platform: see the comments in the code below.
 //   NOTE on fidelity: the tie-breakers come from std::mt19937_64, NOT numpy's
 //   PCG64. So the output is reproducible given a seed but is NOT identical to
 //   the original numpy `seed` output — a deliberate choice. Matching numpy
@@ -106,16 +107,22 @@ std::vector<std::size_t> order_by_size(
         // The 64-bit engine, so every bit of the seed counts: std::mt19937
         // keeps only the low 32, making seeds 2**32 apart identical.
         std::mt19937_64 gen(seed.value());
-        std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-        std::vector<double> tie_breakers(n);
+        // Raw engine output, not a std:: distribution: the standard fixes
+        // mt19937_64's output bit for bit, but leaves each distribution's
+        // algorithm to the library, so libstdc++, libc++ and MSVC would
+        // shuffle the same seed differently.
+        std::vector<std::uint64_t> tie_breakers(n);
 
         for (std::size_t i = 0; i < n; ++i) {
-            tie_breakers[i] = dist(gen);
+            tie_breakers[i] = gen();
         }
 
+        // The index settles equal tie-breakers, so no two items compare equal
+        // and std::sort, whose order for equal items differs by library, has
+        // no choice left to make.
         std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-            return std::make_tuple(-buckets[a], tie_breakers[a]) < std::make_tuple(-buckets[b], tie_breakers[b]);
+            return std::make_tuple(-buckets[a], tie_breakers[a], a) < std::make_tuple(-buckets[b], tie_breakers[b], b);
         });
     }
     else {
@@ -403,7 +410,7 @@ Args:
     max_length (int): Bin capacity in tokens.
     tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
         lengths in the same bucket count as ties.
-    seed (int | None): Shuffles ties reproducibly on a given platform;
+    seed (int | None): Shuffles ties reproducibly on every platform;
         any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties by
         original index.
 
@@ -440,7 +447,7 @@ Args:
     max_length (int): Bin capacity in tokens.
     tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
         lengths in the same bucket count as ties.
-    seed (int | None): Shuffles ties reproducibly on a given platform;
+    seed (int | None): Shuffles ties reproducibly on every platform;
         any integer in ``[0, 2**64)``, like NumPy's. ``None`` breaks ties by
         original index.
 
