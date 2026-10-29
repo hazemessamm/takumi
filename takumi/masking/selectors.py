@@ -20,8 +20,8 @@ def coerce_focus(
     ``expected_shape``.
 
     Args:
-        focus (ArrayLike | Sequence | None, shape (B, L)): Positions to bias
-            selection toward; truthy values count as focus.
+        focus (np.ndarray | ArrayLike | Sequence | None, shape (B, L)):
+            Positions to bias selection toward; truthy values count as focus.
         expected_shape (tuple[int, int]): The sequences' shape ``(B, L)``.
 
     Returns:
@@ -48,9 +48,9 @@ def coerce_focus(
 
 
 def focus_from_reference(
-    sequences: typing.Any,
-    reference: typing.Any,
-) -> typing.Any:
+    sequences: typing.Union[np.ndarray, backend.ArrayLike],
+    reference: typing.Union[np.ndarray, backend.ArrayLike],
+) -> typing.Union[np.ndarray, backend.ArrayLike]:
     """Build a focus mask that is True wherever ``sequences != reference``.
 
     The reference is a per-position template — a base sentence, an original
@@ -62,13 +62,14 @@ def focus_from_reference(
     Returns a torch/JAX tensor when ``sequences`` is one, else a NumPy array.
 
     Args:
-        sequences (ArrayLike of int, shape (B, L) or (L,)): Token ids.
-        reference (ArrayLike of int, shape (L,), (1, L) or (B, L)): The
-            template to compare against.
+        sequences (np.ndarray | ArrayLike of int, shape (B, L) or (L,)):
+            Token ids.
+        reference (np.ndarray | ArrayLike of int, shape (L,), (1, L) or
+            (B, L)): The template to compare against.
 
     Returns:
-        ArrayLike of bool, shape of ``sequences``: True where the tokens
-        differ from the reference.
+        np.ndarray | ArrayLike of bool, shape of ``sequences``: True where
+        the tokens differ from the reference.
 
     Raises:
         ValueError: If either input is not 1-D or 2-D, the lengths differ,

@@ -20,27 +20,32 @@ class MaskingResult(typing.NamedTuple):
     ``masked``, ``mutated``, and ``kept`` are boolean masks that partition
     the selected positions (mutually exclusive; their union is the full set
     of positions where ``labels != -100``). The five mask-and-token fields
-    share the input's shape and type; ``timesteps`` and ``weights`` hold one
-    float32 value per row, in the input's type.
+    and ``weights`` share the input's shape and type; ``timesteps`` holds
+    one float32 value per row, in the input's type.
 
     Attributes:
-        sequences (ArrayLike of int, shape (B, L)): The corrupted tokens.
-        labels (ArrayLike of int, shape (B, L)): The original token at every
-            selected position, ``-100`` elsewhere. Unsigned inputs come back
-            as int64 so ``-100`` fits.
-        masked (ArrayLike of bool, shape (B, L)): Replaced with the mask
-            token.
-        mutated (ArrayLike of bool, shape (B, L)): Replaced with a random
-            valid token.
-        kept (ArrayLike of bool, shape (B, L)): Selected but unchanged.
-        timesteps (ArrayLike of float32, shape (B,) | None): Each row's
-            timestep, in the rate policy's units (``[0, total_timesteps]``
-            for `ScheduleRate`, ``(0, 1]`` for `UniformTimestepRate`); None
-            for rates without time. Feed it to a time-conditioned model.
-        weights (ArrayLike of float32, shape (B,)): Each row's ELBO loss
-            weight, to multiply its summed masked-token cross-entropy by;
-            ones for rates without time. Exact for independent per-token
-            masking (`Bernoulli`), as in MDLM (Sahoo et al., 2024).
+        sequences (np.ndarray | ArrayLike of int, shape (B, L)): The
+            corrupted tokens.
+        labels (np.ndarray | ArrayLike of int, shape (B, L)): The original
+            token at every selected position, ``-100`` elsewhere. Unsigned
+            inputs come back as int64 so ``-100`` fits.
+        masked (np.ndarray | ArrayLike of bool, shape (B, L)): Replaced with
+            the mask token.
+        mutated (np.ndarray | ArrayLike of bool, shape (B, L)): Replaced
+            with a random valid token.
+        kept (np.ndarray | ArrayLike of bool, shape (B, L)): Selected but
+            unchanged.
+        timesteps (np.ndarray | ArrayLike of float32, shape (B,) | None):
+            Each row's timestep, in the rate policy's units
+            (``[0, total_timesteps]`` for `ScheduleRate`, ``(0, 1]`` for
+            `UniformTimestepRate`); None for rates without time. Feed it to
+            a time-conditioned model.
+        weights (np.ndarray | ArrayLike of float32, shape (B, L)): Each
+            token's ELBO loss weight, to multiply its cross-entropy by: its
+            row's weight, repeated along the row, so it flattens like
+            ``labels`` for `elbo_loss`. Ones for rates without time. Exact
+            for independent per-token masking (`Bernoulli`), as in MDLM
+            (Sahoo et al., 2024).
 
     Example:
         >>> import numpy as np
@@ -51,16 +56,16 @@ class MaskingResult(typing.NamedTuple):
         >>> bool((selected == (result.masked | result.mutated | result.kept)).all())
         True
         >>> result.timesteps, result.weights.tolist()  # FixedRate has no time
-        (None, [1.0, 1.0])
+        (None, [[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]])
     """
 
-    sequences: backend.ArrayLike
-    labels: backend.ArrayLike
-    masked: backend.ArrayLike
-    mutated: backend.ArrayLike
-    kept: backend.ArrayLike
-    timesteps: typing.Optional[backend.ArrayLike]
-    weights: backend.ArrayLike
+    sequences: typing.Union[np.ndarray, backend.ArrayLike]
+    labels: typing.Union[np.ndarray, backend.ArrayLike]
+    masked: typing.Union[np.ndarray, backend.ArrayLike]
+    mutated: typing.Union[np.ndarray, backend.ArrayLike]
+    kept: typing.Union[np.ndarray, backend.ArrayLike]
+    timesteps: typing.Union[np.ndarray, backend.ArrayLike, None]
+    weights: typing.Union[np.ndarray, backend.ArrayLike]
 
 
 class Corruptor:
@@ -135,28 +140,31 @@ class Corruptor:
 
     def __call__(
         self,
-        sequences: backend.ArrayLike,
+        sequences: typing.Union[np.ndarray, backend.ArrayLike],
         seed: int | None = None,
         excluded_ids: typing.Iterable[int] | None = None,
-        focus: typing.Optional[backend.ArrayLike] = None,
-        timestep: typing.Union[int, float, backend.ArrayLike, None] = None,
+        focus: typing.Union[np.ndarray, backend.ArrayLike, None] = None,
+        timestep: typing.Union[
+            int, float, np.ndarray, backend.ArrayLike, None
+        ] = None,
         index: int | None = None,
     ) -> MaskingResult:
         """Corrupt a batch of token sequences.
 
         Args:
-            sequences (ArrayLike of int, shape (B, L)): Token ids; NumPy
-                array or CPU torch/JAX tensor. The same type is returned and
-                the input is never modified.
+            sequences (np.ndarray | ArrayLike of int, shape (B, L)): Token
+                ids; NumPy array or CPU torch/JAX tensor. The same type is
+                returned and the input is never modified.
             seed (int | None): If given, makes the whole call bit-exact
                 reproducible.
             excluded_ids (Iterable[int] | None): Overrides
                 ``special_token_ids`` for this call.
-            focus (ArrayLike of bool, shape (B, L) | None): Positions to bias
-                selection toward; honored per the selector. None disables it.
-            timestep (int | float | ArrayLike of float, shape (B,) | None):
-                Required by `ScheduleRate`, as a scalar or one per row;
-                ignored by other rates.
+            focus (np.ndarray | ArrayLike of bool, shape (B, L) | None):
+                Positions to bias selection toward; honored per the
+                selector. None disables it.
+            timestep (int | float | np.ndarray | ArrayLike of float, shape
+                (B,) | None): Required by `ScheduleRate`, as a scalar or one
+                per row; ignored by other rates.
             index (int | None): Pins a candidate for `SampledRate`; ignored
                 otherwise.
 
@@ -166,8 +174,9 @@ class Corruptor:
             input's type: ``labels`` holds the original token at every
             selected position and ``-100`` elsewhere; ``masked`` /
             ``mutated`` / ``kept`` partition the selected positions by
-            outcome. ``timesteps`` and ``weights`` are ``(B,)`` per-row
-            values from the rate policy's `RateDraw`.
+            outcome. ``timesteps`` is the ``(B,)`` per-row value from the
+            rate policy's `RateDraw`; ``weights`` is ``(B, L)``, each row's
+            weight from it repeated along the row.
 
         Raises:
             ValueError: If ``focus`` has the wrong shape, the rate policy
@@ -201,7 +210,10 @@ class Corruptor:
 
         # The policy checks that per-row values have one entry per row.
         rate, timesteps, weights = self.rate(ctx)
+        # One weight per token, like labels, so the two flatten the same way
+        # for elbo_loss; every token in a row shares the row's weight.
         weights = np.asarray(weights, dtype=np.float32)
+        weights = np.repeat(weights[:, None], arr.shape[1], axis=1)
         if timesteps is not None:
             timesteps = np.asarray(timesteps, dtype=np.float32)
 

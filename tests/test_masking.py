@@ -73,7 +73,7 @@ MASK = 99
 # The backend is chosen once at import time from TAKUMI_MASKING_BACKEND, not
 # from what happens to be installed — so "is torch importable?" is the wrong
 # question for a test that asserts torch tensors come back out.
-ACTIVE_BACKEND = backend.framework(None)
+ACTIVE_BACKEND = backend.framework()
 
 
 def _batch(rows=8, length=32, low=10, high=60):
@@ -915,18 +915,20 @@ def test_masking_result_carries_timesteps_and_weights():
     seq = _batch(rows=3)
     plain = FixedMasker(0.5, 0.8, 0.1, MASK, VOCAB, SPECIALS)(seq, seed=0)
     assert plain.timesteps is None
-    assert plain.weights.tolist() == [1.0, 1.0, 1.0]
+    assert plain.weights.shape == seq.shape and np.all(plain.weights == 1.0)
 
     steps = np.array([10, 50, 90])
     diffusion = DiffusionMasker(100, MASK, SPECIALS, time="discrete")(
         seq, seed=0, timestep=steps)
     assert diffusion.timesteps.tolist() == [10, 50, 90]
     assert diffusion.weights.dtype == np.float32
+    assert diffusion.weights.shape == seq.shape  # one per token, like labels
     expected = [CosineSchedule().discrete_elbo_weight(t, 100) for t in steps]
-    assert diffusion.weights.tolist() == pytest.approx(expected, rel=1e-6)
+    assert diffusion.weights[:, 0].tolist() == pytest.approx(expected, rel=1e-6)
+    assert np.all(diffusion.weights == diffusion.weights[:, :1])  # row-constant
 
     maskgit = MaskGITMasker(MASK, SPECIALS)(seq, seed=0)
-    assert maskgit.timesteps.shape == (3,) and maskgit.weights.shape == (3,)
+    assert maskgit.timesteps.shape == (3,) and maskgit.weights.shape == seq.shape
 
 
 def test_corruptor_rejects_weights_of_the_wrong_shape():
@@ -1016,14 +1018,19 @@ def _value(loss):
 
 def _weighted_sum(ce, result):
     selected = backend.to_numpy(result.labels) != -100
-    rows = np.where(selected, ce, 0.0).sum(axis=1)
-    return (backend.to_numpy(result.weights) * rows).sum()
+    weights = backend.to_numpy(result.weights)
+    return (weights * np.where(selected, ce, 0.0)).sum()
 
 
-def _elbo(ce, result, **kwargs):
-    # The (B*L,) layout elbo_loss takes, from (B, L) arrays.
-    return elbo_loss(ce.reshape(-1), result.labels.reshape(-1), result.weights,
-                     **kwargs)
+# elbo_loss takes backend tensors, as a training loop has them.
+_t = backend.to_tensor
+
+
+def _elbo(ce, result, attention_mask=None):
+    # The (B*L,) layout, from (B, L) arrays.
+    mask = None if attention_mask is None else _t(attention_mask)
+    return elbo_loss(_t(ce.reshape(-1)), _t(result.labels.reshape(-1)),
+                     _t(result.weights.reshape(-1)), attention_mask=mask)
 
 
 def test_elbo_loss_is_the_nelbo_per_token():
@@ -1043,6 +1050,17 @@ def test_elbo_loss_attention_mask_leaves_padding_out_of_the_count():
     assert _value(loss) == pytest.approx(expected, rel=1e-6)
 
 
+def test_elbo_loss_takes_every_input_flat_or_as_rows():
+    result = _diffusion_result(padding=8)
+    ce = _token_loss(result.labels.shape)  # (B, L)
+    attention_mask = np.ones(ce.shape, dtype=bool)
+    attention_mask[:, -8:] = False
+    as_rows = elbo_loss(_t(ce), _t(result.labels), _t(result.weights),
+                        attention_mask=_t(attention_mask))
+    flat = _elbo(ce, result, attention_mask=attention_mask.reshape(-1))
+    assert _value(as_rows) == _value(flat)
+
+
 def test_elbo_loss_ignores_unlabelled_positions():
     result = _diffusion_result()
     ce = _token_loss(result.labels.shape)
@@ -1051,58 +1069,31 @@ def test_elbo_loss_ignores_unlabelled_positions():
 
 
 def test_elbo_loss_is_zero_when_nothing_is_masked():
-    loss = elbo_loss(np.ones(32), np.full(32, -100), np.ones(4))
+    loss = elbo_loss(_t(np.ones(32)), _t(np.full(32, -100)), _t(np.ones(32)))
     assert _value(loss) == 0.0
 
 
 def test_elbo_loss_is_zero_when_the_mask_leaves_no_tokens():
     # The labelled position is masked out too, so nothing is summed.
-    loss = elbo_loss(np.ones(4), np.array([5, -100, -100, -100]), np.ones(1),
-                     attention_mask=np.zeros(4))
+    loss = elbo_loss(_t(np.ones(4)), _t(np.array([5, -100, -100, -100])),
+                     _t(np.ones(4)), attention_mask=_t(np.zeros(4)))
     assert _value(loss) == 0.0
 
 
 def test_elbo_loss_takes_no_loss_outside_the_attention_mask():
-    labels = np.array([5, 6, -100, 7])  # B = 1; the last position is padding
-    mask = np.array([1, 1, 1, 0])
-    loss = elbo_loss(np.full(4, 2.0), labels, np.ones(1), attention_mask=mask)
+    labels = _t(np.array([5, 6, -100, 7]))  # B = 1; the last is padding
+    mask = _t(np.array([1, 1, 1, 0]))
+    loss = elbo_loss(_t(np.full(4, 2.0)), labels, _t(np.ones(4)),
+                     attention_mask=mask)
     assert _value(loss) == pytest.approx(4.0 / 3)  # (2 + 2) / 3 real tokens
 
 
-@pytest.mark.parametrize("shape", [(), (8, 32), (256, 5)])
-def test_elbo_loss_rejects_a_loss_that_is_not_flat(shape):
-    result = _diffusion_result()
-    with pytest.raises(ValueError, match="flattened per-token loss"):
-        elbo_loss(np.ones(shape), result.labels.reshape(-1), result.weights)
-
-
-def test_elbo_loss_rejects_one_loss_per_row():
-    result = _diffusion_result()
-    with pytest.raises(ValueError, match="reduction='none'"):
-        elbo_loss(np.ones(8), result.labels.reshape(-1), result.weights)
-
-
-def test_elbo_loss_rejects_labels_that_are_not_flat():
-    result = _diffusion_result()
-    with pytest.raises(ValueError, match="labels must be flattened"):
-        elbo_loss(np.ones(256), result.labels, result.weights)
-
-
-@pytest.mark.parametrize(
-    "shape, message",
-    [((8, 1), "one value per row"), ((7,), "split evenly"), ((0,), "split evenly")],
-)
-def test_elbo_loss_rejects_weights_that_do_not_give_the_rows(shape, message):
-    result = _diffusion_result()
-    with pytest.raises(ValueError, match=message):
-        elbo_loss(np.ones(256), result.labels.reshape(-1), np.ones(shape))
-
-
-def test_elbo_loss_rejects_an_attention_mask_that_is_not_flat():
-    result = _diffusion_result()
-    with pytest.raises(ValueError, match="attention_mask must be flattened"):
-        elbo_loss(np.ones(256), result.labels.reshape(-1), result.weights,
-                  attention_mask=np.ones((8, 32)))
+@pytest.mark.parametrize("shape", [(), (2,)])
+def test_elbo_loss_rejects_a_loss_that_is_not_per_position(shape):
+    # () is a reduction="mean" scalar, (2,) one loss per row of a 2 x 3 batch.
+    labels = _t(np.array([5, -100, 6, 7, -100, -100]))
+    with pytest.raises(ValueError, match="one loss per position"):
+        elbo_loss(_t(np.full(shape, 2.0)), labels, _t(np.ones(6)))
 
 
 @pytest.mark.skipif(
@@ -1112,10 +1103,11 @@ def test_elbo_loss_rejects_an_attention_mask_that_is_not_flat():
 )
 def test_elbo_loss_torch_sums_in_float32_and_backpropagates():
     torch = pytest.importorskip("torch")
-    result = _diffusion_result()  # NumPy labels and weights
+    result = _diffusion_result()
     ce = torch.as_tensor(_token_loss(256), dtype=torch.bfloat16)
     ce.requires_grad_(True)
-    loss = elbo_loss(ce, result.labels.reshape(-1), result.weights)
+    loss = elbo_loss(ce, _t(result.labels.reshape(-1)),
+                     _t(result.weights.reshape(-1)))
     assert loss.dtype == torch.float32 and loss.ndim == 0
     loss.backward()
     selected = torch.as_tensor(result.labels.reshape(-1) != -100)
@@ -1132,9 +1124,10 @@ def test_elbo_loss_jax_traces_under_jit_and_grad():
     jax = pytest.importorskip("jax")
     result = _diffusion_result()
     labels = result.labels.reshape(-1)
+    weights = result.weights.reshape(-1)
 
     def loss_fn(c):
-        return elbo_loss(c, labels, result.weights)
+        return elbo_loss(c, _t(labels), _t(weights))
 
     ce = jax.numpy.asarray(_token_loss(256), dtype=jax.numpy.float32)
     assert np.allclose(np.asarray(loss_fn(ce)), np.asarray(jax.jit(loss_fn)(ce)))

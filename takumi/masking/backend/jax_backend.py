@@ -1,5 +1,7 @@
 """JAX backend: conversions plus on-device token sampling."""
 
+from __future__ import annotations
+
 import typing
 
 import jax
@@ -47,17 +49,14 @@ def to_numpy(x: jax.numpy.ndarray) -> np.ndarray:
     return np.asarray(x)
 
 
-def framework(x):
+def framework():
     """Name of this backend's framework.
-
-    Args:
-        x (Any): Ignored; accepted so every backend shares one signature.
 
     Returns:
         str: Always ``"jax"``.
 
     Example:
-        >>> framework(None)
+        >>> framework()
         'jax'
     """
     return "jax"
@@ -173,44 +172,51 @@ def loss_sums(
 ) -> typing.Tuple[jax.numpy.ndarray, jax.numpy.ndarray]:
     """Weighted loss and token count for `elbo_loss`, on the loss's device.
 
-    Everything is summed in float32, so a bfloat16 loss works as it comes.
-    Safe to trace under ``jax.jit`` and ``jax.grad``.
+    Flattens every input and sums in float32, so a bfloat16 loss works as
+    it comes. Safe to trace under ``jax.jit`` and ``jax.grad``.
 
     Args:
-        token_loss (jax.Array | np.ndarray of float, shape (B, L)): Loss at
+        token_loss (jax.Array of float, shape (B*L,) or (B, L)): Loss at
             each position.
-        labels (jax.Array | np.ndarray of int, shape (B, L)): ``-100`` where
-            a position takes no loss.
-        weights (jax.Array | np.ndarray of float, shape (B,)): Each row's
-            loss weight.
-        attention_mask (jax.Array | np.ndarray, shape (B, L) | None):
-            Nonzero at real tokens; positions outside it take no loss and
-            are not counted. None counts every position.
+        labels (jax.Array of int, shape (B*L,) or (B, L)): ``-100`` where a
+            position takes no loss.
+        weights (jax.Array of float, shape (B*L,) or (B, L)): Each
+            position's loss weight.
+        attention_mask (jax.Array, shape (B*L,) or (B, L) | None): Nonzero
+            at real tokens; positions outside it take no loss and are not
+            counted. None counts every position.
 
     Returns:
-        tuple[jax.Array, jax.Array]: Two scalars: the rows' weighted sums of
-        their labelled positions' loss, added up; the number of real
-        tokens.
+        tuple[jax.Array, jax.Array]: Two scalars: the weighted loss summed
+        over the labelled positions, and the number of real tokens.
+
+    Raises:
+        ValueError: If ``token_loss`` does not hold one loss per position,
+            such as a ``reduction="mean"`` scalar.
 
     Example:
         >>> import jax.numpy as jnp
-        >>> loss = jnp.array([[1.0, 2.0], [3.0, 4.0]])
-        >>> labels = jnp.array([[5, -100], [5, 5]])
-        >>> sums = loss_sums(loss, labels, jnp.array([2.0, 1.0]))
-        >>> [s.item() for s in sums]  # 2 * 1 + 1 * (3 + 4), 4 tokens
+        >>> loss = jnp.array([1.0, 2.0, 3.0, 4.0])
+        >>> labels = jnp.array([5, -100, 5, 5])
+        >>> weights = jnp.array([[2.0, 2.0], [1.0, 1.0]])  # (B, L)
+        >>> [s.item() for s in loss_sums(loss, labels, weights)]
         [9.0, 4]
     """
-    loss = to_tensor(token_loss).astype(jax.numpy.float32)
-    selected = to_tensor(labels) != -100
+    loss = token_loss.reshape(-1).astype(jax.numpy.float32)
+    labels = labels.reshape(-1)
+    if loss.shape != labels.shape:
+        raise ValueError(
+            "token_loss must hold one loss per position; use reduction='none'"
+        )
+    weights = weights.reshape(-1).astype(jax.numpy.float32)
+    selected = labels != -100
     if attention_mask is None:
         tokens = jax.numpy.asarray(loss.size)
     else:
-        real = to_tensor(attention_mask).astype(bool)
+        real = attention_mask.reshape(-1).astype(bool)
         selected = selected & real
         tokens = real.sum()
-    rows = jax.numpy.where(selected, loss, 0.0).sum(-1)
-    weights = to_tensor(weights).astype(jax.numpy.float32)
-    return (rows * weights).sum(), tokens
+    return (jax.numpy.where(selected, loss, 0.0) * weights).sum(), tokens
 
 
-ArrayLike = typing.Union[np.ndarray, jax.numpy.ndarray]
+ArrayLike: typing.TypeAlias = jax.numpy.ndarray

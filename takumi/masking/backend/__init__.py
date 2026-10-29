@@ -5,18 +5,18 @@ module bound to ``backend``. Both modules expose the same interface:
 
 - ``to_tensor(x)`` / ``to_numpy(x)`` — convert between NumPy and the
   framework's array type.
-- ``framework(x)`` — the backend's name, ``"torch"`` or ``"jax"``.
+- ``framework()`` — the backend's name, ``"torch"`` or ``"jax"``.
 - ``sample(logits, mask_token_id, temperature, rng)`` — on-device sampling
   of one token per position, for `MaskGITDecoder`.
 - ``token_probs(logits, tokens)`` — on-device probability of the tokens
   already in a sequence, for `MaskGITDecoder`'s confidence remasking.
 - ``loss_sums(token_loss, labels, weights, attention_mask)`` — the weighted
   loss and token count `elbo_loss` divides, on the loss's device.
-- ``ArrayLike`` — the union of NumPy arrays and the framework's arrays.
+- ``ArrayLike`` — the framework's array type.
 
 Example:
     >>> from takumi.masking import backend
-    >>> backend.framework(None) in ("torch", "jax")
+    >>> backend.framework() in ("torch", "jax")
     True
 """
 

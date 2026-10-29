@@ -188,40 +188,42 @@ class MaskGITDecoder:
 
     def __call__(
         self,
-        sequences: backend.ArrayLike,
-        sampled: backend.ArrayLike,
-        probs: backend.ArrayLike,
+        sequences: typing.Union[np.ndarray, backend.ArrayLike],
+        sampled: typing.Union[np.ndarray, backend.ArrayLike],
+        probs: typing.Union[np.ndarray, backend.ArrayLike],
         step: int,
-        num_unknown: typing.Union[int, backend.ArrayLike],
-        generated: typing.Optional[backend.ArrayLike] = None,
-        current_probs: typing.Optional[backend.ArrayLike] = None,
-    ) -> backend.ArrayLike:
+        num_unknown: typing.Union[int, np.ndarray, backend.ArrayLike],
+        generated: typing.Union[np.ndarray, backend.ArrayLike, None] = None,
+        current_probs: typing.Union[
+            np.ndarray, backend.ArrayLike, None
+        ] = None,
+    ) -> typing.Union[np.ndarray, backend.ArrayLike]:
         """Advance decoding by one step, drawing noise from ``self.rng``.
 
         Args:
-            sequences (ArrayLike of int, shape (B, L)): Current tokens, with
-                the mask token at unknown positions.
-            sampled (ArrayLike of int, shape (B, L)): Tokens sampled from
-                the model's output.
-            probs (ArrayLike of float, shape (B, L)): Probability the model
-                gave each sampled token.
+            sequences (np.ndarray | ArrayLike of int, shape (B, L)): Current
+                tokens, with the mask token at unknown positions.
+            sampled (np.ndarray | ArrayLike of int, shape (B, L)): Tokens
+                sampled from the model's output.
+            probs (np.ndarray | ArrayLike of float, shape (B, L)):
+                Probability the model gave each sampled token.
             step (int): Index of this step, in ``[0, total_steps)``.
-            num_unknown (int | ArrayLike of int, shape (B,)): Unknown
-                positions per row before step 0. The schedule is a fraction
-                of this.
-            generated (ArrayLike of bool, shape (B, L) | None): Positions
-                that were unknown before step 0, the only ones remasking may
-                touch; prompt and conditioning tokens stay put. Required
-                when ``remask_prob > 0``.
-            current_probs (ArrayLike of float, shape (B, L) | None):
-                Probability the model gives the token currently at each
-                position (see `backend.token_probs`). If given, remasking
-                picks the least confident committed tokens; otherwise
-                random ones.
+            num_unknown (int | np.ndarray | ArrayLike of int, shape (B,)):
+                Unknown positions per row before step 0. The schedule is a
+                fraction of this.
+            generated (np.ndarray | ArrayLike of bool, shape (B, L) | None):
+                Positions that were unknown before step 0, the only ones
+                remasking may touch; prompt and conditioning tokens stay put.
+                Required when ``remask_prob > 0``.
+            current_probs (np.ndarray | ArrayLike of float, shape (B, L) |
+                None): Probability the model gives the token currently at
+                each position (see `backend.token_probs`). If given,
+                remasking picks the least confident committed tokens;
+                otherwise random ones.
 
         Returns:
-            ArrayLike of int, shape (B, L): The tokens to feed the next step,
-            as the type of ``sequences``.
+            np.ndarray | ArrayLike of int, shape (B, L): The tokens to feed
+            the next step, as the type of ``sequences``.
 
         Raises:
             ValueError: If ``step`` is outside ``[0, total_steps)``, or

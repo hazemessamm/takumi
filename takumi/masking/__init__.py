@@ -11,8 +11,9 @@ Conventions used throughout the docstrings:
 - ``B`` is the batch size (rows), ``L`` the sequence length, and ``V`` the
   vocabulary size, so a token batch has shape ``(B, L)`` and model logits
   ``(B, L, V)``.
-- ``ArrayLike`` is a NumPy array or a CPU tensor of the active backend
-  (torch or JAX). Public entry points that take one return the same type.
+- ``ArrayLike`` is a tensor of the active backend (``torch.Tensor`` or
+  ``jax.Array``). Public entry points that take one return the same type;
+  the corruptors and the decoder also take NumPy arrays and return NumPy.
 - Token ids are integers; masks are booleans; ``-100`` in labels marks
   positions the loss ignores.
 - Examples use NumPy inputs, so they behave the same under either backend.

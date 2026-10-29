@@ -1,5 +1,7 @@
 """PyTorch backend: conversions plus on-device token sampling."""
 
+from __future__ import annotations
+
 import typing
 
 import numpy as np
@@ -51,17 +53,14 @@ def to_numpy(x: torch.Tensor) -> np.ndarray:
     return np.asarray(x)
 
 
-def framework(x):
+def framework():
     """Name of this backend's framework.
-
-    Args:
-        x (Any): Ignored; accepted so every backend shares one signature.
 
     Returns:
         str: Always ``"torch"``.
 
     Example:
-        >>> framework(None)
+        >>> framework()
         'torch'
     """
     return "torch"
@@ -183,46 +182,53 @@ def loss_sums(
 ) -> typing.Tuple[torch.Tensor, torch.Tensor]:
     """Weighted loss and token count for `elbo_loss`, on the loss's device.
 
-    ``labels``, ``weights`` and ``attention_mask`` are moved to the loss's
-    device and everything is summed in float32, so CPU-side corruption
-    outputs and a bfloat16 loss work as they come.
+    Flattens every input, moves it to the loss's device and sums in
+    float32, so CPU-side corruption outputs and a bfloat16 loss work as
+    they come.
 
     Args:
-        token_loss (torch.Tensor | np.ndarray of float, shape (B, L)): Loss
-            at each position.
-        labels (torch.Tensor | np.ndarray of int, shape (B, L)): ``-100``
-            where a position takes no loss.
-        weights (torch.Tensor | np.ndarray of float, shape (B,)): Each row's
-            loss weight.
-        attention_mask (torch.Tensor | np.ndarray, shape (B, L) | None):
+        token_loss (torch.Tensor of float, shape (B*L,) or (B, L)): Loss at
+            each position.
+        labels (torch.Tensor of int, shape (B*L,) or (B, L)): ``-100`` where
+            a position takes no loss.
+        weights (torch.Tensor of float, shape (B*L,) or (B, L)): Each
+            position's loss weight.
+        attention_mask (torch.Tensor, shape (B*L,) or (B, L) | None):
             Nonzero at real tokens; positions outside it take no loss and
             are not counted. None counts every position.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: Two scalars: the rows' weighted
-        sums of their labelled positions' loss, added up; the number of real
-        tokens.
+        tuple[torch.Tensor, torch.Tensor]: Two scalars: the weighted loss
+        summed over the labelled positions, and the number of real tokens.
+
+    Raises:
+        ValueError: If ``token_loss`` does not hold one loss per position,
+            such as a ``reduction="mean"`` scalar.
 
     Example:
         >>> import torch
-        >>> loss = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-        >>> labels = torch.tensor([[5, -100], [5, 5]])
-        >>> sums = loss_sums(loss, labels, torch.tensor([2.0, 1.0]))
-        >>> [s.item() for s in sums]  # 2 * 1 + 1 * (3 + 4), 4 tokens
+        >>> loss = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        >>> labels = torch.tensor([5, -100, 5, 5])
+        >>> weights = torch.tensor([[2.0, 2.0], [1.0, 1.0]])  # (B, L)
+        >>> [s.item() for s in loss_sums(loss, labels, weights)]
         [9.0, 4]
     """
-    loss = to_tensor(token_loss).float()
+    loss = token_loss.reshape(-1).float()
     device = loss.device
-    selected = to_tensor(labels).to(device) != -100
+    labels = labels.reshape(-1).to(device)
+    if loss.shape != labels.shape:
+        raise ValueError(
+            "token_loss must hold one loss per position; use reduction='none'"
+        )
+    weights = weights.reshape(-1).to(device, torch.float32)
+    selected = labels != -100
     if attention_mask is None:
         tokens = torch.tensor(loss.numel(), device=device)
     else:
-        real = to_tensor(attention_mask).to(device).bool()
+        real = attention_mask.reshape(-1).to(device).bool()
         selected = selected & real
         tokens = real.sum()
-    rows = torch.where(selected, loss, 0.0).sum(-1)
-    weights = to_tensor(weights).to(device=device, dtype=torch.float32)
-    return (rows * weights).sum(), tokens
+    return (torch.where(selected, loss, 0.0) * weights).sum(), tokens
 
 
-ArrayLike = typing.Union[np.ndarray, torch.Tensor]
+ArrayLike: typing.TypeAlias = torch.Tensor

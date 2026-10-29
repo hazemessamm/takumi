@@ -144,10 +144,11 @@ result = maskgit(x, seed=10)  # each row draws its own timestep
 
 ### ELBO loss weights (masked diffusion)
 
-Every result also carries one value per row: `result.timesteps` (each row's
-noise level, for time-conditioned models; `None` for rates without time) and
-`result.weights`, the masked-diffusion ELBO weight. Multiplying each row's
-summed masked-token cross-entropy by its weight gives the MDLM / MD4
+Every result also carries `result.timesteps`, one value per row (each row's
+noise level, for time-conditioned models; `None` for rates without time), and
+`result.weights`, the masked-diffusion ELBO weight, one per token like
+`labels`: each row's weight repeated along the row. Multiplying each masked
+token's cross-entropy by its weight and summing gives the MDLM / MD4
 objective, an upper bound on the negative log-likelihood. `ScheduleRate` (so
 `DiffusionMasker`) takes a required `time`: `"discrete"` for whole-number
 steps drawn from 1..T, which gets the exact discrete-time weight, or
@@ -174,11 +175,9 @@ ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels,
 loss = elbo_loss(ce, labels, result.weights)
 ```
 
-`elbo_loss` takes the loss, labels and `attention_mask` flattened to `(B*L,)`,
-as above, and splits them back into rows by the `(B,)` weights. Reduce the
-cross-entropy with `reduction="none"`: averaging first and weighting after
-gives a different objective, so `elbo_loss` rejects anything but one loss per
-position.
+`elbo_loss` flattens every input, so each may be `(B*L,)`, as above, or
+`(B, L)`. Reduce the cross-entropy with `reduction="none"`: averaging first
+and weighting after gives a different objective.
 
 The MLM maskers (weights of 1) don't need `elbo_loss`: their loss is the mean
 over the selected tokens, `F.cross_entropy(..., ignore_index=-100)`. Dividing

@@ -270,7 +270,7 @@ def test_weighted_mask_count_averages_to_the_sequence_length(schedule):
     masker = DiffusionMasker(total, MASK, SPECIALS, schedule=schedule,
                              time="discrete")
     result = masker(np.full((rows, length), 25), seed=0, timestep=steps)
-    samples = result.weights.astype(np.float64) * result.masked.sum(axis=1)
+    samples = (result.weights.astype(np.float64) * result.masked).sum(axis=1)
     assert_mean(samples, length, samples.var())
 
 
