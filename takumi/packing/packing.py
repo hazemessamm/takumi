@@ -229,7 +229,7 @@ def pack(
 
     Args:
         lengths (Sequence[int], length N): Sequence lengths; bin entries are
-            indices into this sequence. Each must be ``<= max_length``.
+            indices into this sequence. Each must be from 1 to ``max_length``.
         max_length (int): Bin capacity in tokens.
         algorithm (str): One of ``"first_fit"``, ``"worst_fit"`` (concrete),
             ``"histogram"``, ``"histogram_batched"`` (blueprint).

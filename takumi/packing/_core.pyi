@@ -11,9 +11,9 @@ fails at runtime.
 The docstrings below mirror the ``R"doc"`` strings in packing.cpp (what
 ``help()`` shows at runtime); change both together.
 
-All five functions raise ``ValueError`` (from C++ ``std::invalid_argument``)
-on inputs they cannot pack: a ``tolerance`` below 1, or any length greater
-than ``max_length``.
+The four packers raise ``ValueError`` (from C++ ``std::invalid_argument``)
+on inputs they cannot pack: a ``tolerance`` below 1, or any length below 1
+or greater than ``max_length``.
 """
 
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -30,7 +30,7 @@ def pack_first_fit(
     bin that still has room, opening a fresh bin when none fits.
 
     Args:
-        lengths (Sequence[int], length N): Sequence lengths, each at most
+        lengths (Sequence[int], length N): Sequence lengths, each from 1 to
             ``max_length``.
         max_length (int): Bin capacity in tokens.
         tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
@@ -43,8 +43,8 @@ def pack_first_fit(
         list[list[int]]: Bins, each a list of indices into ``lengths``.
 
     Raises:
-        ValueError: if ``tolerance`` is below 1, or any length exceeds
-            ``max_length``.
+        ValueError: if ``tolerance`` is below 1, or any length is below 1 or
+            exceeds ``max_length``.
 
     Example:
         >>> pack_first_fit([7, 6, 5, 4, 3, 2], max_length=10)
@@ -70,7 +70,7 @@ def pack_worst_fit(
     choice O(log n) per sequence.
 
     Args:
-        lengths (Sequence[int], length N): Sequence lengths, each at most
+        lengths (Sequence[int], length N): Sequence lengths, each from 1 to
             ``max_length``.
         max_length (int): Bin capacity in tokens.
         tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
@@ -83,8 +83,8 @@ def pack_worst_fit(
         list[list[int]]: Bins, each a list of indices into ``lengths``.
 
     Raises:
-        ValueError: if ``tolerance`` is below 1, or any length exceeds
-            ``max_length``.
+        ValueError: if ``tolerance`` is below 1, or any length is below 1 or
+            exceeds ``max_length``.
 
     Example:
         >>> pack_worst_fit([7, 6, 5, 4, 3, 2], max_length=10)
@@ -130,7 +130,7 @@ def pack_histogram(
 
     Args:
         counts (Mapping[int, int]): Length to how many sequences have it; each
-            length at most ``max_length``.
+            length from 1 to ``max_length``.
         max_length (int): Bin capacity in tokens.
 
     Returns:
@@ -138,7 +138,7 @@ def pack_histogram(
         longest first) to how many bins use it, in sorted key order.
 
     Raises:
-        ValueError: if any length exceeds ``max_length``.
+        ValueError: if any length is below 1 or exceeds ``max_length``.
 
     Example:
         >>> pack_histogram({7: 1, 6: 1, 5: 1, 4: 1, 3: 1, 2: 1}, max_length=10)
@@ -161,7 +161,7 @@ def pack_histogram_batched(
 
     Args:
         counts (Mapping[int, int]): Length to how many sequences have it; each
-            length at most ``max_length``.
+            length from 1 to ``max_length``.
         max_length (int): Bin capacity in tokens.
 
     Returns:
@@ -169,7 +169,7 @@ def pack_histogram_batched(
         longest first) to how many bins use it, in sorted key order.
 
     Raises:
-        ValueError: if any length exceeds ``max_length``.
+        ValueError: if any length is below 1 or exceeds ``max_length``.
 
     Example:
         >>> pack_histogram_batched({2: 10, 3: 4}, max_length=8)

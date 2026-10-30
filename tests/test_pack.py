@@ -47,6 +47,12 @@ def test_unknown_algorithm_raises():
         pack(LENGTHS, CAP, "frist_fit")
 
 
+def test_pack_rejects_length_below_one_for_every_algorithm():
+    for algorithm in ["first_fit", "worst_fit", "histogram", "histogram_batched"]:
+        with pytest.raises(ValueError, match="must be at least 1"):
+            pack([5, 0, 3], CAP, algorithm)
+
+
 def test_histogram_returns_a_plan():
     assert isinstance(pack(LENGTHS, CAP, "histogram"), PackingPlan)
     assert isinstance(pack(LENGTHS, CAP, "histogram_batched"), PackingPlan)
@@ -61,6 +67,38 @@ def test_histogram_plan_matches_underlying_packers():
 
     batched = pack(LENGTHS, CAP, "histogram_batched")
     assert batched.templates == pack_histogram_batched(counts, CAP)
+
+
+# --- input validation -------------------------------------------------------
+
+# Every packer checks each length before it opens a bin. Zero used to hang
+# pack_histogram_batched, which divides by the length; zero and negative
+# lengths were otherwise packed silently, a negative one as extra free space.
+BAD_LENGTHS = [
+    (0, "must be at least 1"),
+    (-3, "must be at least 1"),
+    (CAP + 1, f"exceeds max_length {CAP}"),
+]
+
+
+@pytest.mark.parametrize(("bad", "message"), BAD_LENGTHS)
+@pytest.mark.parametrize("packer", [pack_first_fit, pack_worst_fit])
+def test_concrete_packers_reject_bad_length(packer, bad, message):
+    with pytest.raises(ValueError, match=f"Length {bad} at index 1 {message}"):
+        packer([5, bad, 3], CAP)
+
+
+@pytest.mark.parametrize(("bad", "message"), BAD_LENGTHS)
+@pytest.mark.parametrize("packer", [pack_histogram, pack_histogram_batched])
+def test_histogram_packers_reject_bad_length(packer, bad, message):
+    with pytest.raises(ValueError, match=f"Length {bad} {message}"):
+        packer({5: 1, bad: 2}, CAP)
+
+
+def test_lengths_at_both_bounds_are_accepted():
+    lengths = [1, CAP, 1, CAP]
+    assert pack_first_fit(lengths, CAP) == [[1], [3], [0, 2]]
+    assert pack_histogram_batched({1: 2, CAP: 2}, CAP) == {(1, 1): 1, (CAP,): 2}
 
 
 # --- PackingPlan ------------------------------------------------------------

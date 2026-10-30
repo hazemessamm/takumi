@@ -53,6 +53,17 @@ def test_worked_example_from_docs():
     assert bins == [[0, 4], [1, 3], [2, 5]]
 
 
+def test_consecutive_lengths_fill_every_bin():
+    # Lengths 1..999 (length k + 1 at index k) into bins of 999: 999 goes
+    # alone, then each length k pairs with 999 - k, so all 500 bins are full.
+    # Every sequence fits exactly one open bin here, so this pins the answer
+    # at scale but cannot tell First-Fit from another fit rule; the reference
+    # tests below do that.
+    lengths = list(range(1, 1000))
+    expected = [[998]] + [[998 - k, k - 1] for k in range(1, 500)]
+    assert pack_first_fit(lengths, max_length=999) == expected
+
+
 def test_matches_python_reference_randomized():
     rng = random.Random(0)
     for _ in range(200):
@@ -60,6 +71,23 @@ def test_matches_python_reference_randomized():
         cap = rng.randint(4, 32)
         lengths = [rng.randint(1, cap) for _ in range(n)]
         assert pack_first_fit(lengths, cap) == reference_greedy(lengths, cap)
+
+
+# Thousands of sequences, each length repeated many times: First-Fit often has
+# several open bins to choose from, and equal lengths must break ties by
+# position exactly as the reference does. "long tail" keeps most sequences
+# short, so bins hold many of them.
+@pytest.mark.parametrize(
+    ("distribution", "cap"),
+    [("uniform", 64), ("uniform", 1024), ("long tail", 256)],
+)
+def test_matches_python_reference_at_scale(distribution, cap):
+    rng = random.Random(cap)
+    if distribution == "uniform":
+        lengths = [rng.randint(1, cap) for _ in range(3000)]
+    else:
+        lengths = [min(cap, 1 + int(rng.expovariate(8 / cap))) for _ in range(3000)]
+    assert pack_first_fit(lengths, cap) == reference_greedy(lengths, cap)
 
 
 def test_empty_input():

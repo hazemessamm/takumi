@@ -38,21 +38,41 @@ namespace nb = nanobind;
 
 namespace {
 
-// Reject sequences that cannot fit a bin even on their own. Without this the
-// concrete packers happily open a bin with negative remaining capacity and
-// return a packing that violates max_length; pack_histogram already refuses
-// the same input, so this keeps the two families on one contract.
+// Reject a length no packer can place; every packer calls this before it
+// opens a bin, so all four share one contract. Below 1 it is not a sequence:
+// the packers would file it into bins as free (or negative) space, and
+// pack_histogram_batched divides by it — integer division by zero is
+// undefined behaviour, an endless loop on arm64 and SIGFPE on x86-64. Above
+// max_length it cannot fit a bin even on its own, and the packers would open
+// a bin with negative remaining capacity. `index` names the offending position
+// when the caller has one (the histogram packers only have the length).
 // std::invalid_argument surfaces in Python as ValueError.
-void require_fits(
+void require_packable(
+    std::int64_t length,
+    std::int64_t max_length,
+    std::optional<std::size_t> index = std::nullopt) {
+    if (length >= 1 && length <= max_length) {
+        return;
+    }
+    std::string where = index.has_value()
+        ? " at index " + std::to_string(index.value())
+        : std::string();
+    if (length < 1) {
+        throw std::invalid_argument(
+            "Length " + std::to_string(length) + where + " must be at least 1");
+    }
+    throw std::invalid_argument(
+        "Length " + std::to_string(length) + where + " exceeds max_length " +
+        std::to_string(max_length));
+}
+
+// require_packable over a whole list, naming the index of the first bad
+// length; the concrete packers call this, since they have positions.
+void require_all_packable(
     const std::vector<std::int64_t>& lengths,
     std::int64_t max_length) {
     for (std::size_t i = 0; i < lengths.size(); ++i) {
-        if (lengths[i] > max_length) {
-            throw std::invalid_argument(
-                "Length " + std::to_string(lengths[i]) + " at index " +
-                std::to_string(i) + " exceeds max_length " +
-                std::to_string(max_length));
-        }
+        require_packable(lengths[i], max_length, i);
     }
 }
 
@@ -148,7 +168,7 @@ std::vector<std::vector<std::int64_t>> pack_first_fit(
     std::int64_t tolerance,
     std::optional<std::uint64_t> seed) {
 
-    require_fits(lengths, max_length);
+    require_all_packable(lengths, max_length);
     const std::vector<std::size_t> order = order_by_size(lengths, tolerance, seed);
 
     std::vector<std::vector<std::int64_t>> bins;
@@ -184,7 +204,7 @@ std::vector<std::vector<std::int64_t>> pack_worst_fit(
     std::int64_t tolerance,
     std::optional<std::uint64_t> seed) {
 
-    require_fits(lengths, max_length);
+    require_all_packable(lengths, max_length);
     const std::vector<std::size_t> order = order_by_size(lengths, tolerance, seed);
     std::vector<std::vector<std::int64_t>> bins;
     // Max-heap on (remaining_capacity, bin_idx): front() is the loosest bin (WFD).
@@ -280,9 +300,7 @@ std::vector<std::vector<std::int64_t>> pack_worst_fit(
         std::int64_t max_length) {
 
             for (const auto& [length, count] : counts) {
-                if (length > max_length) {
-                    throw std::invalid_argument("Length " + std::to_string(length) + " exceeds max_length " + std::to_string(max_length));
-                }
+                require_packable(length, max_length);
             }
 
             std::vector<std::pair<std::int64_t, std::size_t>> heap;
@@ -342,9 +360,7 @@ std::vector<std::vector<std::int64_t>> pack_worst_fit(
         std::int64_t max_length) {
 
         for (const auto& [length, count] : counts) {
-            if (length > max_length) {
-                throw std::invalid_argument("Length " + std::to_string(length) + " exceeds max_length " + std::to_string(max_length));
-            }
+            require_packable(length, max_length);
         }
 
         std::vector<std::pair<std::int64_t, std::size_t>> heap;  // max-heap on (remaining_capacity, bin_idx)
@@ -405,7 +421,7 @@ Sorts sequences longest first, then places each into the first (oldest) open
 bin that still has room, opening a fresh bin when none fits.
 
 Args:
-    lengths (Sequence[int], length N): Sequence lengths, each at most
+    lengths (Sequence[int], length N): Sequence lengths, each from 1 to
         ``max_length``.
     max_length (int): Bin capacity in tokens.
     tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
@@ -418,8 +434,8 @@ Returns:
     list[list[int]]: Bins, each a list of indices into ``lengths``.
 
 Raises:
-    ValueError: if ``tolerance`` is below 1, or any length exceeds
-        ``max_length``.
+    ValueError: if ``tolerance`` is below 1, or any length is below 1 or
+        exceeds ``max_length``.
 
 Example:
     >>> pack_first_fit([7, 6, 5, 4, 3, 2], max_length=10)
@@ -442,7 +458,7 @@ the first one that fits. A max-heap keyed on remaining capacity makes that
 choice O(log n) per sequence.
 
 Args:
-    lengths (Sequence[int], length N): Sequence lengths, each at most
+    lengths (Sequence[int], length N): Sequence lengths, each from 1 to
         ``max_length``.
     max_length (int): Bin capacity in tokens.
     tolerance (int): Bucket width for the longest-first sort, ``>= 1``;
@@ -455,8 +471,8 @@ Returns:
     list[list[int]]: Bins, each a list of indices into ``lengths``.
 
 Raises:
-    ValueError: if ``tolerance`` is below 1, or any length exceeds
-        ``max_length``.
+    ValueError: if ``tolerance`` is below 1, or any length is below 1 or
+        exceeds ``max_length``.
 
 Example:
     >>> pack_worst_fit([7, 6, 5, 4, 3, 2], max_length=10)
@@ -496,7 +512,7 @@ result is a reusable blueprint of bin layouts.
 
 Args:
     counts (Mapping[int, int]): Length to how many sequences have it; each
-        length at most ``max_length``.
+        length from 1 to ``max_length``.
     max_length (int): Bin capacity in tokens.
 
 Returns:
@@ -504,7 +520,7 @@ Returns:
     longest first) to how many bins use it, in sorted key order.
 
 Raises:
-    ValueError: if any length exceeds ``max_length``.
+    ValueError: if any length is below 1 or exceeds ``max_length``.
 
 Example:
     >>> pack_histogram({7: 1, 6: 1, 5: 1, 4: 1, 3: 1, 2: 1}, max_length=10)
@@ -524,7 +540,7 @@ ones); its templates tend to group more identical lengths per bin.
 
 Args:
     counts (Mapping[int, int]): Length to how many sequences have it; each
-        length at most ``max_length``.
+        length from 1 to ``max_length``.
     max_length (int): Bin capacity in tokens.
 
 Returns:
@@ -532,7 +548,7 @@ Returns:
     longest first) to how many bins use it, in sorted key order.
 
 Raises:
-    ValueError: if any length exceeds ``max_length``.
+    ValueError: if any length is below 1 or exceeds ``max_length``.
 
 Example:
     >>> pack_histogram_batched({2: 10, 3: 4}, max_length=8)
